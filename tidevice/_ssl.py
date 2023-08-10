@@ -80,7 +80,7 @@ def make_cert(req: X509Req, ca_pkey: PKey) -> X509:
 
 def make_req(pub_key, cn=None, digest=None) -> X509Req:
     req = X509Req()
-    req.set_version(2)
+    req.set_version(0)
     req.set_pubkey(pub_key)
     if cn is not None:
         subject = req.get_subject()
