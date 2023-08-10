@@ -4,12 +4,14 @@
 set -e
 
 rm -fr dist/ build/
+python3 setup.py build
+#python3 setup.py install --prefix=/Users/wangzeyuan/Documents/fnsdk/tidevice/install
 python3 setup.py sdist bdist_wheel
 
-export TWINE_REPOSITORY_URL=https://upload.pypi.org/legacy/
-export TWINE_USERNAME=codeskyblue
+#export TWINE_REPOSITORY_URL=https://upload.pypi.org/legacy/
+#export TWINE_USERNAME=codeskyblue
 
 ## set password to keyring
 # keyring set https://upload.pypi.org/legacy/ $TWINE_USERNAME
 
-exec twine upload dist/*
+#exec twine upload dist/*

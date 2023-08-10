@@ -678,6 +678,28 @@ def cmd_savesslfile(args: argparse.Namespace):
     )
 
 
+def cmd_debug_firebase(args: argparse.Namespace):
+    d = _udid2device(args.udid)
+
+    env = {}
+    for kv in args.env or []:
+        key, val = kv.split(":", 1)
+        env[key] = val
+    if env:
+        logger.info("App launch env: %s", env)
+    launch_args = args.arguments
+    launch_args.append('-FIRAnalyticsDebugEnabled')
+
+    try:
+        with d.connect_instruments() as ts:
+            pid = ts.app_launch(args.bundle_id,
+                                        app_env=env,
+                                        args=launch_args,
+                                        kill_running=not args.skip_running)
+            print("PID:", pid)
+    except ServiceError as e:
+        sys.exit(e)
+
 def cmd_test(args: argparse.Namespace):
     print("Just test")
 
@@ -950,6 +972,17 @@ _commands = [
          command="savesslfile",
          help="save to ssl/xxxx_root.pem and ssl/xxxx_host.pem"),
     dict(action=cmd_test, command="test", help="command for developer"),
+    dict(action=cmd_debug_firebase,
+         command="debugfirebase",
+         flags=[
+             dict(args=['--skip-running'], action='store_true', help='not kill app if running'),
+             dict(args=["bundle_id"], help="app bundleId"),
+             dict(args=['arguments'], nargs='*', help='app arguments'),
+             dict(args=['-e', '--env'],
+                  action='append',
+                  help="set env with format key:value, support multi -e"),
+         ],
+         help="launch app with bundle_id, and firebase open debug mode"),
 ]
 
 
