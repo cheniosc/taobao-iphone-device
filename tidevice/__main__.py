@@ -689,6 +689,7 @@ def cmd_debug_firebase(args: argparse.Namespace):
         logger.info("App launch env: %s", env)
     launch_args = args.arguments
     launch_args.append('-FIRAnalyticsDebugEnabled')
+    launch_args.append('-FIRDebugEnabled')
 
     try:
         with d.connect_instruments() as ts:
