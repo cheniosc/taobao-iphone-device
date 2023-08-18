@@ -23,11 +23,13 @@ class FNDeviceDebugApp:
         self.root = None
         self.um = Usbmux()
         self.device_combobox: ttk.Combobox = None
-        self.bunde_entry: Entry = None
+        # self.bunde_entry: Entry = None
+        self.bundle_combobox: ttk.Combobox = None
         self.syslog_text: Text = None
         self.syslog_button: Button = None
         self.syslog_service = None
         self.syslog_queue = queue.Queue()
+        self.syslog_filter_entry: Entry = None
 
     @staticmethod
     def set_win(tk, title, width=800, height=480):
@@ -100,6 +102,26 @@ class FNDeviceDebugApp:
         if len(values) > 0:
             self.device_combobox.current(0)
 
+    def get_app_infos(self):
+        try:
+            d = self.get_selected_device()
+        except Exception:
+            return {}
+        app_type = "User"
+        app_infos = {}
+        for info in d.installation.iter_installed(app_type=app_type):
+            bundle_id = info['CFBundleIdentifier']
+            app_infos[bundle_id] = [info['CFBundleDisplayName'], bundle_id]
+        return app_infos
+
+    def update_bundle_data(self, Event=None):
+        # 大概位置是在下拉箭头的区域
+        if Event.x < self.bundle_combobox.winfo_width() - 30:
+            return
+        app_infos = self.get_app_infos()
+        values = [app_infos[bundle_id][0]+" "+app_infos[bundle_id][1] for bundle_id in app_infos]
+        self.bundle_combobox["values"] = values
+
     def get_selected_device(self) -> Device:
         device_name = self.device_combobox.get()
         if device_name == '':
@@ -109,6 +131,15 @@ class FNDeviceDebugApp:
         d = self.udid2device(udid)
         return d
 
+    def get_selected_bundleid(self):
+        bundle = self.bundle_combobox.get()
+        app_infos = self.get_app_infos()
+        for bundle_id in app_infos:
+            if app_infos[bundle_id][0]+" "+app_infos[bundle_id][1] == bundle:
+                return bundle_id
+
+        return bundle
+
     def launch_app(self):
         try:
             d = self.get_selected_device()
@@ -116,7 +147,7 @@ class FNDeviceDebugApp:
             alert(e)
             return
 
-        bunde_id = self.bunde_entry.get()
+        bunde_id = self.get_selected_bundleid()
         if bunde_id == '':
             alert("请输入应用BundleID")
             return
@@ -133,9 +164,12 @@ class FNDeviceDebugApp:
         except Exception as e:
             alert(e)
 
+    def reset_syslog_button_text(self):
+        self.syslog_button.config(text="打开实时日志")
+
     def toggle_syslog(self):
         if self.syslog_service:
-            self.syslog_button.config(text="打开实时日志")
+            self.reset_syslog_button_text()
             self.syslog_service.close()
         else:
             self.syslog_button.config(text="关闭实时日志")
@@ -154,21 +188,34 @@ class FNDeviceDebugApp:
             while not self.syslog_service.closed:
                 text = self.syslog_service.psock.recv().decode('utf-8')
                 text = text.replace('\x00', '')
-                self.syslog_queue.put(text)
+                syslog_filter = self.syslog_filter_entry.get()
+                if syslog_filter == '' or text.find(syslog_filter) != -1:
+                    self.syslog_queue.put(text)
 
                 # return
             self.syslog_service = None
+            self.reset_syslog_button_text()
         except (BrokenPipeError, IOError):
             self.syslog_service = None
+            self.reset_syslog_button_text()
 
     def check_queue(self):
         while not self.syslog_queue.empty():
-            line = self.syslog_queue.get()
-            print(line)
-            self.syslog_text.insert(tkinter.END, line)
+            lines = []
+            for _ in range(20):
+                if not self.syslog_queue.empty():
+                    line = self.syslog_queue.get()
+                    lines.append(line)
+                else:
+                    break
+            self.syslog_text.insert(tkinter.END, "".join(lines))
             self.syslog_text.see(tkinter.END)
+            # self.syslog_text.update_idletasks()
 
-        self.root.after(50, self.check_queue)
+        self.root.after(150, self.check_queue)
+
+    def clear_text(self):
+        self.syslog_text.delete(1.0, END)
 
     def show(self):
         root = tkinter.Tk()
@@ -177,17 +224,20 @@ class FNDeviceDebugApp:
 
         row = 1
         device_label = Label(root, text="设备：")
-        device_label.grid(row=row, column=1, sticky=tkinter.E)
+        device_label.grid(row=row, column=2, sticky=tkinter.E)
         self.device_combobox = ttk.Combobox(root, state="readonly")
-        self.device_combobox.grid(row=row, column=3, columnspan=2, sticky=tkinter.W)
         self.update_combobox_data()
+        self.device_combobox.grid(row=row, column=3, columnspan=2, sticky=tkinter.W)
         self.device_combobox.bind("<Button-1>", self.update_combobox_data)
 
         row += 2
         bundle_label = Label(root, text="应用BundleID：")
-        bundle_label.grid(row=row, column=1, sticky=tkinter.E)
-        self.bunde_entry = Entry(root)
-        self.bunde_entry.grid(row=row, column=3, rowspan=2, sticky=tkinter.W)
+        bundle_label.grid(row=row, column=2, sticky=tkinter.E)
+        # self.bunde_entry = Entry(root)
+        # self.bunde_entry.grid(row=row, column=3, rowspan=2, sticky=tkinter.W)
+        self.bundle_combobox = ttk.Combobox(root)
+        self.bundle_combobox.grid(row=row, column=3, columnspan=2, sticky=tkinter.W)
+        self.bundle_combobox.bind("<Button-1>", self.update_bundle_data)
 
         row += 2
         launch_button = Button(root, text="调试", command=self.launch_app, width=10)
@@ -204,7 +254,16 @@ class FNDeviceDebugApp:
         xscrollbar.config(command=self.syslog_text.xview)
 
         row += 8
-        self.syslog_button = Button(root, text="打开实时日志", command=self.toggle_syslog)
+        syslog_filter_label = Label(root, text="日志过滤：", )
+        syslog_filter_label.grid(row=row, column=2, sticky=tkinter.E)
+        self.syslog_filter_entry = Entry(root)
+        self.syslog_filter_entry.grid(row=row, column=3, sticky=tkinter.W)
+
+
+        row += 1
+        clear_text_button = Button(root, text="清除日志", command=self.clear_text, width=10)
+        clear_text_button.grid(row=row, column=2, sticky=tkinter.E)
+        self.syslog_button = Button(root, text="打开实时日志", command=self.toggle_syslog, width=10)
         self.syslog_button.grid(row=row, column=3, sticky=tkinter.W)
 
 
@@ -212,7 +271,7 @@ class FNDeviceDebugApp:
             root.columnconfigure(i, weight=1)
 
         self.root = root
-        self.root.after(100, self.check_queue)
+        self.root.after(150, self.check_queue)
         self.root.mainloop()
 
 
