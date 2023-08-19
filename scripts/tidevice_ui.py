@@ -23,7 +23,6 @@ class FNDeviceDebugApp:
         self.root = None
         self.um = Usbmux()
         self.device_combobox: ttk.Combobox = None
-        # self.bunde_entry: Entry = None
         self.bundle_combobox: ttk.Combobox = None
         self.syslog_text: Text = None
         self.syslog_button: Button = None
@@ -140,6 +139,25 @@ class FNDeviceDebugApp:
 
         return bundle
 
+    def show_entitlements(self):
+        try:
+            d = self.get_selected_device()
+        except Exception as e:
+            alert(e)
+            return
+
+        bunde_id = self.get_selected_bundleid()
+        if bunde_id == '':
+            alert("请输入应用BundleID")
+            return
+
+        info = d.installation.lookup(bunde_id)
+        if info is None and 'Entitlements' not in info:
+            alert("查不到相关权限信息")
+            return
+        else:
+            alert(info['Entitlements'])
+
     def launch_app(self):
         try:
             d = self.get_selected_device()
@@ -202,6 +220,7 @@ class FNDeviceDebugApp:
     def check_queue(self):
         while not self.syslog_queue.empty():
             lines = []
+            # 一次填充多个，避免频繁操作Text的insert，导致卡死
             for _ in range(20):
                 if not self.syslog_queue.empty():
                     line = self.syslog_queue.get()
@@ -210,7 +229,6 @@ class FNDeviceDebugApp:
                     break
             self.syslog_text.insert(tkinter.END, "".join(lines))
             self.syslog_text.see(tkinter.END)
-            # self.syslog_text.update_idletasks()
 
         self.root.after(150, self.check_queue)
 
@@ -220,9 +238,8 @@ class FNDeviceDebugApp:
     def show(self):
         root = tkinter.Tk()
         self.set_win(root, 'iOS调试工具', 800, 480)
-        # root.configure(bg='white')
 
-        row = 1
+        row = 0
         device_label = Label(root, text="设备：")
         device_label.grid(row=row, column=2, sticky=tkinter.E)
         self.device_combobox = ttk.Combobox(root, state="readonly")
@@ -230,20 +247,20 @@ class FNDeviceDebugApp:
         self.device_combobox.grid(row=row, column=3, columnspan=2, sticky=tkinter.W)
         self.device_combobox.bind("<Button-1>", self.update_combobox_data)
 
-        row += 2
+        row += 1
         bundle_label = Label(root, text="应用BundleID：")
         bundle_label.grid(row=row, column=2, sticky=tkinter.E)
-        # self.bunde_entry = Entry(root)
-        # self.bunde_entry.grid(row=row, column=3, rowspan=2, sticky=tkinter.W)
         self.bundle_combobox = ttk.Combobox(root)
         self.bundle_combobox.grid(row=row, column=3, columnspan=2, sticky=tkinter.W)
         self.bundle_combobox.bind("<Button-1>", self.update_bundle_data)
 
-        row += 2
+        row += 1
+        entitlement_button = Button(root, text="查看应用权限", command=self.show_entitlements, width=10)
+        entitlement_button.grid(row=row, column=2, sticky=E, padx=(0, 5))
         launch_button = Button(root, text="调试", command=self.launch_app, width=10)
         launch_button.grid(row=row, column=3, sticky=tkinter.W)
 
-        row += 2
+        row += 1
         yscrollbar = Scrollbar(root)
         yscrollbar.grid(row=row, column=6, rowspan=7, sticky="nsw")
         xscrollbar = Scrollbar(root, orient=HORIZONTAL)
@@ -259,17 +276,14 @@ class FNDeviceDebugApp:
         self.syslog_filter_entry = Entry(root)
         self.syslog_filter_entry.grid(row=row, column=3, sticky=tkinter.W)
 
-
         row += 1
         clear_text_button = Button(root, text="清除日志", command=self.clear_text, width=10)
-        clear_text_button.grid(row=row, column=2, sticky=tkinter.E)
+        clear_text_button.grid(row=row, column=2, sticky=E, padx=(0, 5))
         self.syslog_button = Button(root, text="打开实时日志", command=self.toggle_syslog, width=10)
-        self.syslog_button.grid(row=row, column=3, sticky=tkinter.W)
-
+        self.syslog_button.grid(row=row, column=3, sticky=W)
 
         for i in range(7):
             root.columnconfigure(i, weight=1)
-
         self.root = root
         self.root.after(150, self.check_queue)
         self.root.mainloop()
