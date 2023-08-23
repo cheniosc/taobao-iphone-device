@@ -12,7 +12,7 @@ from tidevice._device import Device
 from tidevice.exceptions import MuxError, MuxServiceError, ServiceError
 import threading
 import queue
-
+from tidevice._ssl import *
 
 def alert(message):
     tkinter.messagebox.showinfo("", message)
