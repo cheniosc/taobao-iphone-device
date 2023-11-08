@@ -6,7 +6,7 @@
 
 [English](README_EN.md)
 
-QQ交流群: _134535547_  (进群答案: ios)
+QQ交流群: _134535547_  (进群答案: 自己猜吧，不行就问gpt)
 
 该工具能够用于与iOS设备进行通信, 提供以下功能
 
@@ -115,7 +115,7 @@ $ tidevice ps --json output as json
 
 ```bash
 # 运行XCTEST
-$ tidevice xctest -B com.facebook.wda.WebDriverAgent.Runner
+$ tidevice xcuitest -B com.facebook.wda.WebDriverAgent.Runner
 [I 210127 11:40:23 _device:909] BundleID: com.facebook.wda.WebDriverAgent.Runner
 [I 210127 11:40:23 _device:911] DeviceIdentifier: 12345678901234567890abcdefg
 [I 210127 11:40:23 _device:773] SignIdentity: 'Apple Development: -Your-Developer-Name-'
@@ -125,7 +125,7 @@ $ tidevice xctest -B com.facebook.wda.WebDriverAgent.Runner
 [I 210127 11:40:24 _device:875] WebDriverAgent start successfully
 
 # 修改监听端口为8200, 并显示调试日志
-$ tidevice xctest -B com.facebook.wda.WebDriverAgent.Runner -e USE_PORT:8200 --debug
+$ tidevice xcuitest -B com.facebook.wda.WebDriverAgent.Runner -e USE_PORT:8200 --debug
 ```
 
 ### Relay
@@ -180,7 +180,7 @@ Ref issue [#46](https://github.com/alibaba/taobao-iphone-device/issues/46)
 执行方法
 
 ```bash
-$ tidevice xctest --bundle-id philhuang.testXCTestUITests.xctrunner --target-bundle-id philhuang.testXCTest
+$ tidevice xcuitest --bundle-id philhuang.testXCTestUITests.xctrunner --target-bundle-id philhuang.testXCTest
 # ... 省略一部分不重要的信息 ...
 [I 210301 15:37:07 _device:887] logProcess: 2021-03-01 15:37:07.924620+0800 testXCTestUITests-Runner[81644:13765443] Running tests...
 [I 210301 15:37:07 _device:984] Test runner ready detected

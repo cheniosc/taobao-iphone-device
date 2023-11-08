@@ -3,7 +3,6 @@
 # Python 3.x
 # codeskyblue 2020/05/18
 
-import contextlib
 import datetime
 import fnmatch
 import io
@@ -12,8 +11,6 @@ import os
 import pathlib
 import re
 import shutil
-import socket
-import ssl
 import struct
 import sys
 import tempfile
@@ -21,7 +18,6 @@ import threading
 import time
 import typing
 import uuid
-import zipfile
 from typing import Iterator, Optional, Union
 
 import requests
@@ -32,15 +28,15 @@ from retry import retry
 
 from . import bplist, plistlib2
 from ._crash import CrashManager
-from ._imagemounter import ImageMounter, cache_developer_image
+from ._imagemounter import ImageMounter, get_developer_image_path
 from ._installation import Installation
-from ._instruments import (AUXMessageBuffer, DTXMessage, DTXService, Event,
+from ._instruments import (AUXMessageBuffer, DTXMessage, DTXPayload, DTXService, Event,
                            ServiceInstruments)
 from ._ipautil import IPAReader
 from ._proto import *
 from ._safe_socket import *
 from ._sync import Sync
-from ._types import DeviceInfo
+from ._types import DeviceInfo, XCTestResult
 from ._usbmux import Usbmux
 from ._utils import (ProgressReader, get_app_dir, semver_compare,
                      set_socket_timeout)
@@ -48,7 +44,7 @@ from .datatypes import *
 from .exceptions import *
 from .session import Session
 
-logger = logging.getLogger(LOG.main)
+logger = logging.getLogger(__name__)
 
 
 def pil_imread(data: Union[str, pathlib.Path, bytes, bytearray]) -> Image.Image:
@@ -87,12 +83,12 @@ class BaseDevice():
 
     @property
     def debug(self) -> bool:
-        return logging.getLogger(LOG.main).level == logging.DEBUG
+        return logging.getLogger(LOG.root).level == logging.DEBUG
 
     @debug.setter
     def debug(self, v: bool):
         # log setup
-        setup_logger(LOG.main,
+        setup_logger(LOG.root,
             level=logging.DEBUG if v else logging.INFO)
 
     @property
@@ -366,7 +362,7 @@ class BaseDevice():
         else:
             with self.create_session() as conn:
                 ret = conn.send_recv_packet(request)
-                return ret['Value']
+                return ret.get('Value')
 
     def set_value(self, domain: str, key: str, value: typing.Any):
         request = {
@@ -525,7 +521,7 @@ class BaseDevice():
         #  'Port': 53428,
         #  'Request': 'StartService',
         #  'Service': 'com.apple.xxx'}
-        assert data['Service'] == name
+        assert data.get('Service') == name
         _ssl = data.get(
             'EnableServiceSSL',
             False)
@@ -611,7 +607,6 @@ class BaseDevice():
         conn = self._unsafe_start_service(ImageMounter.SERVICE_NAME)
         return ImageMounter(conn)
 
-    @contextlib.contextmanager
     def _request_developer_image_dir(self):
         # use local path first
         # use download cache resource second
@@ -625,31 +620,17 @@ class BaseDevice():
         image_path = os.path.join(mac_developer_dir, "DeveloperDiskImage.dmg")
         signature_path = image_path + ".signature"
         if os.path.isfile(image_path) and os.path.isfile(signature_path):
-            yield mac_developer_dir
-        else:
-            image_zip_path = cache_developer_image(version)
-            with tempfile.TemporaryDirectory() as tmpdir:
-                zf = zipfile.ZipFile(image_zip_path)
-                zf.extractall(tmpdir)
-                rootfiles = os.listdir(tmpdir)
-
-                rootdirs = []
-                for fname in rootfiles:
-                    if fname.startswith("_") or fname.startswith("."):
-                        continue
-                    if os.path.isdir(os.path.join(tmpdir, fname)):
-                        rootdirs.append(fname)
-
-                if len(rootfiles) == 0: # empty zip
-                    raise RuntimeError("deviceSupport zip file is empty")
-                elif os.path.isfile(os.path.join(tmpdir, "DeveloperDiskImage.dmg")):
-                    yield tmpdir
-                elif version in rootdirs: # contains directory: {version}
-                    yield os.path.join(tmpdir, version)
-                elif len(rootdirs) == 1: # only contain one directory
-                    yield os.path.join(tmpdir, rootdirs[0])
-                else:
-                    raise RuntimeError("deviceSupport for {} not detected DeveloperDiskImage".format(version))
+            return mac_developer_dir
+        for guess_minor in range(int(minor), -1, -1):
+            version = major + "." + str(guess_minor)
+            try:
+                image_path = get_developer_image_path(version)
+                logger.info("Use DeveloperImage version: %s", version)
+                return image_path
+            except (DownloadError, DeveloperImageError):
+                if guess_minor == 0:
+                    raise
+                logger.debug("DeveloperImage not found: %s", version)
 
     def _test_if_developer_mounted(self) -> bool:
         try:
@@ -659,13 +640,13 @@ class BaseDevice():
         except MuxServiceError:
             return False
 
-    def mount_developer_image(self):
+    def mount_developer_image(self, reboot_ok: bool = False):
         """
         Raises:
             MuxError, ServiceError
         """
         if semver_compare(self.product_version, "16.0.0") >= 0:
-            self.enable_ios16_developer_mode()
+            self.enable_ios16_developer_mode(reboot_ok=reboot_ok)
         try:
             if self.imagemounter.is_developer_mounted():
                 logger.info("DeveloperImage already mounted")
@@ -677,11 +658,11 @@ class BaseDevice():
             logger.info("DeviceLocked, but DeveloperImage already mounted")
             return
 
-        with self._request_developer_image_dir() as _dir: #, signature_path:
-            image_path = os.path.join(_dir, "DeveloperDiskImage.dmg")
-            signature_path = image_path + ".signature"
-            self.imagemounter.mount(image_path, signature_path)
-            logger.info("DeveloperImage mounted successfully")
+        developer_img_dir = self._request_developer_image_dir()
+        image_path = os.path.join(developer_img_dir, "DeveloperDiskImage.dmg")
+        signature_path = image_path + ".signature"
+        self.imagemounter.mount(image_path, signature_path)
+        logger.info("DeveloperImage mounted successfully")
 
     @property
     def sync(self) -> Sync:
@@ -822,19 +803,40 @@ class BaseDevice():
 
         return ServiceInstruments(conn)
         
-    def _launch_app_runner(self,
+    def _gen_xctest_configuration(self,
+                                        app_info: dict,
+                                        session_identifier: uuid.UUID,
+                                        target_app_bundle_id: str = None,
+                                        target_app_env: Optional[dict] = None,
+                                        target_app_args: Optional[list] = None,
+                                        tests_to_run: Optional[set] = None) -> bplist.XCTestConfiguration:
+        # CFBundleName always endswith -Runner
+        exec_name: str = app_info['CFBundleExecutable']
+        assert exec_name.endswith("-Runner"), "Invalid CFBundleExecutable: %s" % exec_name
+        target_name = exec_name[:-len("-Runner")]
+
+        # xctest_path = f"/tmp/{target_name}-{str(session_identifier).upper()}.xctestconfiguration"  # yapf: disable
+        return bplist.XCTestConfiguration({
+            "testBundleURL": bplist.NSURL(None, f"file://{app_info['Path']}/PlugIns/{target_name}.xctest"),
+            "sessionIdentifier": session_identifier,
+            "targetApplicationBundleID": target_app_bundle_id,
+            "targetApplicationArguments": target_app_args or [],
+            "targetApplicationEnvironment": target_app_env or {},
+            "testsToRun": tests_to_run or set(),  # We can use "set()" or "None" as default value, but "{}" won't work because the decoding process regards "{}" as a dictionary.
+            "testsMustRunOnMainThread": True,
+            "reportResultsToIDE": True,
+            "reportActivities": True,
+            "automationFrameworkPath": "/Developer/Library/PrivateFrameworks/XCTAutomationSupport.framework",
+        })  # yapf: disable
+
+    def _launch_wda_app(self,
                     bundle_id: str,
                     session_identifier: uuid.UUID,
-                    target_app_bundle_id: str = None,
-                    logger: logging.Logger = logging,
+                    xctest_configuration: bplist.XCTestConfiguration,
                     quit_event: threading.Event = None,
                     test_runner_env: Optional[dict] = None,
-                    test_runner_args: Optional[list] = None,
-                    target_app_env: Optional[dict] = None,
-                    target_app_args: Optional[list] = None) -> typing.Tuple[ServiceInstruments, int]:  # pid
-
-        logger = logging.getLogger(LOG.xctest)
-
+                    test_runner_args: Optional[list] = None
+                ) -> typing.Tuple[ServiceInstruments, int]:  # pid
         app_info = self.installation.lookup(bundle_id)
         sign_identity = app_info.get("SignerIdentity", "")
         logger.info("SignIdentity: %r", sign_identity)
@@ -848,13 +850,7 @@ class BaseDevice():
         target_name = exec_name[:-len("-Runner")]
 
         xctest_path = f"/tmp/{target_name}-{str(session_identifier).upper()}.xctestconfiguration"  # yapf: disable
-        xctest_content = bplist.objc_encode(bplist.XCTestConfiguration({
-            "testBundleURL": bplist.NSURL(None, f"file://{app_info['Path']}/PlugIns/{target_name}.xctest"),
-            "sessionIdentifier": session_identifier,
-            "targetApplicationBundleID": target_app_bundle_id,
-            "targetApplicationArguments": target_app_args or [],
-            "targetApplicationEnvironment": target_app_env or {},
-        }))  # yapf: disable
+        xctest_content = bplist.objc_encode(xctest_configuration)
 
         fsync = self.app_sync(bundle_id, command="VendContainer")
         for fname in fsync.listdir("/tmp"):
@@ -874,22 +870,21 @@ class BaseDevice():
         identifier = "launchSuspendedProcessWithDevicePath:bundleIdentifier:environment:arguments:options:"
         app_path = app_info['Path']
 
-        xctestconfiguration_path = app_container + xctest_path  # "/tmp/WebDriverAgentRunner-" + str(session_identifier).upper() + ".xctestconfiguration"
+        xctestconfiguration_path = app_container + xctest_path  # xctest_path="/tmp/WebDriverAgentRunner-" + str(session_identifier).upper() + ".xctestconfiguration"
         logger.debug("AppPath: %s", app_path)
-        logger.info("AppContainer: %s", app_container)
+        logger.debug("AppContainer: %s", app_container)
         app_env = {
             'CA_ASSERT_MAIN_THREAD_TRANSACTIONS': '0',
             'CA_DEBUG_TRANSACTIONS': '0',
             'DYLD_FRAMEWORK_PATH': app_path + '/Frameworks:',
             'DYLD_LIBRARY_PATH': app_path + '/Frameworks',
+            'MTC_CRASH_ON_REPORT': '1',
             'NSUnbufferedIO': 'YES',
             'SQLITE_ENABLE_THREAD_ASSERTIONS': '1',
             'WDA_PRODUCT_BUNDLE_IDENTIFIER': '',
+            'XCTestBundlePath': f"{app_info['Path']}/PlugIns/{target_name}.xctest",
             'XCTestConfigurationFilePath': xctestconfiguration_path,
             'XCODE_DBG_XPC_EXCLUSIONS': 'com.apple.dt.xctestSymbolicator',
-            # '__XCODE_BUILT_PRODUCTS_DIR_PATHS': '/tmp/derivedDataPath/Build/Products/Release-iphoneos',
-            # '__XPC_DYLD_FRAMEWORK_PATH': '/tmp/derivedDataPath/Build/Products/Release-iphoneos',
-            # '__XPC_DYLD_LIBRARY_PATH': '/tmp/derivedDataPath/Build/Products/Release-iphoneos',
             'MJPEG_SERVER_PORT': '',
             'USE_PORT': '',
             # maybe no needed
@@ -923,25 +918,6 @@ class BaseDevice():
         aux.append_obj(pid)
         conn.call_message(channel, "startObservingPid:", aux)
 
-        # activitytracetap = False  # even through xcode use it, but it seems works fine without it
-        # if activitytracetap:
-
-        # if self._is_12_plus:
-        #     actchan = conn.make_channel(
-        #         'com.apple.instruments.server.services.activitytracetap')
-        #     conn.call_message(
-        #         actchan, 'setConfig:',
-        #         [{
-        #             'bm': 0,
-        #             'excludeDebug': True,
-        #             'excludeInfo': True,
-        #             'onlySignposts': False,
-        #             'predicate': "processID == %d && messageType == 'fault' && subsystem == 'com.apple.runtime-issues'".format(pid),
-        #             'ur': 500
-        #         }]) # yapf: disable
-        #     # start activitytracetap
-        #     conn.call_message(actchan, "start", [])
-
         def _callback(m: DTXMessage):
             # logger.info("output: %s", m.result)
             if m is None:
@@ -954,6 +930,7 @@ class BaseDevice():
                     logger.debug("logProcess: %s", args[0].rstrip())
                     # In low iOS versions, 'Using singleton test manager' may not be printed... mark wda launch status = True if server url has been printed
                     if "ServerURLHere" in args[0]:
+                        logger.info("%s", args[0].rstrip())
                         logger.info("WebDriverAgent start successfully")
 
         def _log_message_callback(m: DTXMessage):
@@ -968,7 +945,6 @@ class BaseDevice():
 
     def major_version(self) -> int:
         version = self.get_value("ProductVersion")
-        logger.debug("ProductVersion: %s", version)
         return int(version.split(".")[0])
 
     def _fnmatch_find_bundle_id(self, bundle_id: str) -> str:
@@ -985,25 +961,28 @@ class BaseDevice():
             key=lambda v: v != 'com.facebook.wda.irmarunner.xctrunner')
         return bundle_ids[0]
 
-    def xctest(self, fuzzy_bundle_id="com.*.xctrunner", target_bundle_id=None, logger=None,
+    def runwda(self, fuzzy_bundle_id="com.*.xctrunner", target_bundle_id=None,
                test_runner_env: Optional[dict]=None,
                test_runner_args: Optional[list]=None,
                target_app_env: Optional[dict]=None,
-               target_app_args: Optional[list]=None):
+               target_app_args: Optional[list]=None,
+               tests_to_run: Optional[set]=None):
         """ Alias of xcuitest """
         bundle_id = self._fnmatch_find_bundle_id(fuzzy_bundle_id)
         logger.info("BundleID: %s", bundle_id)
         return self.xcuitest(bundle_id, target_bundle_id=target_bundle_id,
-                             logger=logger, test_runner_env=test_runner_env,
+                             test_runner_env=test_runner_env,
                              test_runner_args=test_runner_args,
                              target_app_env=target_app_env,
-                             target_app_args=target_app_args)
+                             target_app_args=target_app_args,
+                             tests_to_run=tests_to_run)
 
-    def xcuitest(self, bundle_id, target_bundle_id=None, logger=None,
+    def xcuitest(self, bundle_id, target_bundle_id=None,
                  test_runner_env: dict={},
                  test_runner_args: Optional[list]=None,
                  target_app_env: Optional[dict]=None,
-                 target_app_args: Optional[list]=None):
+                 target_app_args: Optional[list]=None,
+                 tests_to_run: Optional[set]=None):
         """
         Launch xctrunner and wait until quit
 
@@ -1014,13 +993,11 @@ class BaseDevice():
             test_runner_args (list[str]): optional, the command line arguments to be passed to the test runner
             target_app_env (dict[str, str]): optional, the environmen variables to be passed to the target app
             target_app_args (list[str]): optional, the command line arguments to be passed to the target app
+            tests_to_run (set[str]): optional, the specific test classes or test methods to run
         """
-        if not logger:
-            logger = setup_logger(level=logging.INFO)
-
         product_version = self.get_value("ProductVersion")
         logger.info("ProductVersion: %s", product_version)
-        logger.info("DeviceIdentifier: %s", self.udid)
+        logger.info("UDID: %s", self.udid)
 
         XCODE_VERSION = 29
         session_identifier = uuid.uuid4()
@@ -1041,8 +1018,7 @@ class BaseDevice():
             identifier = '_IDE_initiateControlSessionWithProtocolVersion:'
             aux = AUXMessageBuffer()
             aux.append_obj(XCODE_VERSION)
-            result = x1.call_message(x1_daemon_chan, identifier, aux)
-            logger.debug("result: %s", result)
+            x1.call_message(x1_daemon_chan, identifier, aux)
         x1.register_callback(Event.FINISHED, lambda _: quit_event.set())
 
         ##
@@ -1067,15 +1043,45 @@ class BaseDevice():
 
         def _show_log_message(m: DTXMessage):
             logger.debug("logMessage: %s", m.result[1])
-            if 'Received test runner ready reply with error: (null' in ''.join(
+            if 'Received test runner ready reply' in ''.join(
                     m.result[1]):
                 logger.info("Test runner ready detected")
                 _start_executing()
+
+        test_results = []
+        test_results_lock = threading.Lock()
+
+        def _record_test_result_callback(m: DTXMessage):
+            result = None
+            if isinstance(m.result, (tuple, list)) and len(m.result) >= 1:
+              if isinstance(m.result[1], (tuple, list)):
+                  try:
+                    result = XCTestResult(*m.result[1])
+                  except TypeError:
+                    pass
+            if not result:
+                logger.warning('Ignore unknown test result message: %s', m)
+                return
+            with test_results_lock:
+                test_results.append(result)
 
         x2.register_callback(
             '_XCT_testBundleReadyWithProtocolVersion:minimumVersion:',
             _start_executing)  # This only happends <= iOS 13
         x2.register_callback('_XCT_logDebugMessage:', _show_log_message)
+        x2.register_callback(
+            "_XCT_testSuite:didFinishAt:runCount:withFailures:unexpected:testDuration:totalDuration:",
+            _record_test_result_callback)
+
+        app_info = self.installation.lookup(bundle_id)
+        xctest_configuration = self._gen_xctest_configuration(app_info, session_identifier, target_bundle_id, target_app_env, target_app_args, tests_to_run)
+
+        def _ready_with_caps_callback(m: DTXMessage):
+            x2.send_dtx_message(m.channel_id,
+                              payload=DTXPayload.build_other(0x03, xctest_configuration),
+                              message_id=m.message_id)
+            
+        x2.register_callback('_XCT_testRunnerReadyWithCapabilities:', _ready_with_caps_callback)
 
         # index: 469
         identifier = '_IDE_initiateSessionWithIdentifier:forClient:atPath:protocolVersion:'
@@ -1086,17 +1092,18 @@ class BaseDevice():
             '/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild')
         aux.append_obj(XCODE_VERSION)
         result = x2.call_message(x2_deamon_chan, identifier, aux)
-        logger.debug("result: %s", result)
+        if "NSError" in str(result):
+            raise RuntimeError("Xcode Invocation Failed: {}".format(result))
 
         # launch test app
         # index: 1540
-        xclogger = setup_logger(name='xctest')
-        _, pid = self._launch_app_runner(
-            bundle_id, session_identifier,
-            target_app_bundle_id=target_bundle_id,
-            logger=xclogger,
-            test_runner_env=test_runner_env, test_runner_args=test_runner_args,
-            target_app_env=target_app_env, target_app_args=target_app_args)
+        xclogger = setup_logger(name='xcuitest')
+        _, pid = self._launch_wda_app(
+            bundle_id,
+            session_identifier,
+            xctest_configuration=xctest_configuration,
+            test_runner_env=test_runner_env,
+            test_runner_args=test_runner_args)
 
         # xcode call the following commented method, twice
         # but it seems can be ignored
@@ -1122,20 +1129,17 @@ class BaseDevice():
             aux = AUXMessageBuffer()
             aux.append_obj(pid)
             result = x1.call_message(x1_daemon_chan, identifier, aux)
-            logger.debug("result: %s", result)
         elif self.major_version() <= 9:
             identifier = '_IDE_initiateControlSessionForTestProcessID:'
             aux = AUXMessageBuffer()
             aux.append_obj(pid)
             result = x1.call_message(x1_daemon_chan, identifier, aux)
-            logger.debug("result: %s", result)
         else:
             identifier = '_IDE_initiateControlSessionForTestProcessID:protocolVersion:'
             aux = AUXMessageBuffer()
             aux.append_obj(pid)
             aux.append_obj(XCODE_VERSION)
             result = x1.call_message(x1_daemon_chan, identifier, aux)
-            logger.debug("result: %s", result)
 
         if "NSError" in str(result):
             raise RuntimeError("Xcode Invocation Failed: {}".format(result))
@@ -1144,7 +1148,15 @@ class BaseDevice():
         # on windows threading.Event.wait can't handle ctrl-c
         while not quit_event.wait(.1):
             pass
-        logger.info("xctrunner quited")
+
+        test_result_str = "\n".join(map(str, test_results))
+        if any(result.failure_count > 0 for result in test_results):
+              raise RuntimeError(
+                  "Xcode test failed on device with test results:\n"
+                  f"{test_result_str}"
+              )
+
+        logger.info("xctrunner quited with result:\n%s", test_result_str)
 
 
 Device = BaseDevice
