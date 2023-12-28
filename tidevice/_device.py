@@ -9,6 +9,7 @@ import io
 import logging
 import os
 import pathlib
+import platform
 import re
 import shutil
 import struct
@@ -45,6 +46,8 @@ from .exceptions import *
 from .session import Session
 
 logger = logging.getLogger(__name__)
+xcuitest_process_logger = logging.getLogger(LOG.xcuitest_process_log)
+xcuitest_console_logger = logging.getLogger(LOG.xcuitest_console_log)
 
 
 def pil_imread(data: Union[str, pathlib.Path, bytes, bytearray]) -> Image.Image:
@@ -191,7 +194,7 @@ class BaseDevice():
         wifi_address = self.get_value("WiFiAddress", no_session=True)
 
         try:
-            from ._ssl import make_certs_and_key
+            from ._ca import make_certs_and_key
         except ImportError:
             #print("DevicePair require pyOpenSSL and pyans1, install by the following command")
             #print("\tpip3 install pyOpenSSL pyasn1", flush=True)
@@ -496,7 +499,7 @@ class BaseDevice():
     def start_service(self, name: str) -> PlistSocketProxy:
         try:
             return self._unsafe_start_service(name)
-        except MuxServiceError:
+        except (MuxServiceError, MuxError):
             self.mount_developer_image()
             # maybe should wait here
             time.sleep(.5)
@@ -607,30 +610,23 @@ class BaseDevice():
         conn = self._unsafe_start_service(ImageMounter.SERVICE_NAME)
         return ImageMounter(conn)
 
-    def _request_developer_image_dir(self):
-        # use local path first
-        # use download cache resource second
-        # download from network third
-        product_version = self.get_value("ProductVersion")
-        logger.info("ProductVersion: %s", product_version)
-        major, minor = product_version.split(".")[:2]
-        version = major + "." + minor
-
-        mac_developer_dir = f"/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/DeviceSupport/{version}"
-        image_path = os.path.join(mac_developer_dir, "DeveloperDiskImage.dmg")
-        signature_path = image_path + ".signature"
-        if os.path.isfile(image_path) and os.path.isfile(signature_path):
-            return mac_developer_dir
-        for guess_minor in range(int(minor), -1, -1):
-            version = major + "." + str(guess_minor)
-            try:
-                image_path = get_developer_image_path(version)
-                logger.info("Use DeveloperImage version: %s", version)
-                return image_path
-            except (DownloadError, DeveloperImageError):
-                if guess_minor == 0:
-                    raise
-                logger.debug("DeveloperImage not found: %s", version)
+    def _request_developer_image_dir(self, major: int, minor: int) -> typing.Optional[str]:
+        # 1. use local path
+        # 2. use download cache resource
+        # 3. download from network
+        version = str(major) + "." + str(minor)
+        if platform.system() == "Darwin":
+            mac_developer_dir = f"/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/DeviceSupport/{version}"
+            image_path = os.path.join(mac_developer_dir, "DeveloperDiskImage.dmg")
+            signature_path = image_path + ".signature"
+            if os.path.isfile(image_path) and os.path.isfile(signature_path):
+                return mac_developer_dir
+        try:
+            image_path = get_developer_image_path(version)
+            return image_path
+        except (DownloadError, DeveloperImageError):
+            logger.debug("DeveloperImage not found: %s", version)
+            return None
 
     def _test_if_developer_mounted(self) -> bool:
         try:
@@ -645,7 +641,8 @@ class BaseDevice():
         Raises:
             MuxError, ServiceError
         """
-        if semver_compare(self.product_version, "16.0.0") >= 0:
+        product_version = self.get_value("ProductVersion")
+        if semver_compare(product_version, "16.0.0") >= 0:
             self.enable_ios16_developer_mode(reboot_ok=reboot_ok)
         try:
             if self.imagemounter.is_developer_mounted():
@@ -658,11 +655,23 @@ class BaseDevice():
             logger.info("DeviceLocked, but DeveloperImage already mounted")
             return
 
-        developer_img_dir = self._request_developer_image_dir()
-        image_path = os.path.join(developer_img_dir, "DeveloperDiskImage.dmg")
-        signature_path = image_path + ".signature"
-        self.imagemounter.mount(image_path, signature_path)
-        logger.info("DeveloperImage mounted successfully")
+        major, minor = product_version.split(".")[:2]
+        for guess_minor in range(int(minor), -1, -1):
+            version = f"{major}.{guess_minor}"
+            developer_img_dir = self._request_developer_image_dir(int(major), guess_minor)
+            if developer_img_dir:
+                image_path = os.path.join(developer_img_dir, "DeveloperDiskImage.dmg")
+                signature_path = image_path + ".signature"
+                try:
+                    self.imagemounter.mount(image_path, signature_path)
+                    logger.info("DeveloperImage %s mounted successfully", version)
+                    return
+                except MuxError as err:
+                    if "ImageMountFailed" in str(err):
+                        logger.info("DeveloperImage %s mount failed, try next version", version)
+                    else:
+                        raise ServiceError("ImageMountFailed")
+        raise ServiceError("DeveloperImage not found")
 
     @property
     def sync(self) -> Sync:
@@ -694,16 +703,22 @@ class BaseDevice():
     def app_start(self,
                   bundle_id: str,
                   args: Optional[list] = [],
-                  kill_running: bool = True) -> int:
+                  env: typing.Mapping = {}) -> int:
         """
         start application
         
-        return pid
+        Args:
+            bundle_id: com.apple.Preferences
+            args: eg ['-AppleLanguages', '(en)']
+            env: eg {'MYPATH': '/tmp'}
 
-        Note: kill_running better to True, if set to False, launch 60 times will trigger instruments service stop
+        Returns:
+            pid
         """
+        if args is None:
+            args = []
         with self.connect_instruments() as ts:
-            return ts.app_launch(bundle_id, args=args, kill_running=kill_running)
+            return ts.app_launch(bundle_id, args=args, app_env=env)
 
     def app_install(self, file_or_url: Union[str, typing.IO]) -> str:
         """
@@ -928,6 +943,10 @@ class BaseDevice():
                 if method == 'outputReceived:fromProcess:atTime:':
                     # logger.info("Output: %s", args[0].strip())
                     logger.debug("logProcess: %s", args[0].rstrip())
+                    # XCTestOutputBarrier is just ouput separators, no need to
+                    # print them in the logs.
+                    if args[0].rstrip() != 'XCTestOutputBarrier':
+                        xcuitest_console_logger.debug('%s', args[0].rstrip())
                     # In low iOS versions, 'Using singleton test manager' may not be printed... mark wda launch status = True if server url has been printed
                     if "ServerURLHere" in args[0]:
                         logger.info("%s", args[0].rstrip())
@@ -936,6 +955,13 @@ class BaseDevice():
         def _log_message_callback(m: DTXMessage):
             identifier, args = m.result
             logger.debug("logConsole: %s", args)
+            if isinstance(args, (tuple, list)):
+                for msg in args:
+                    msg = msg.rstrip() if isinstance(msg, str) else msg
+                    xcuitest_process_logger.debug('%s', msg)
+            else:
+                xcuitest_process_logger.debug('%s', args)
+
 
         conn.register_callback("_XCT_logDebugMessage:", _log_message_callback)
         conn.register_callback(Event.NOTIFICATION, _callback)
@@ -1047,6 +1073,13 @@ class BaseDevice():
                     m.result[1]):
                 logger.info("Test runner ready detected")
                 _start_executing()
+
+            if isinstance(m.result[1], (tuple, list)):
+              for msg in m.result[1]:
+                msg = msg.rstrip() if isinstance(msg, str) else msg
+                xcuitest_process_logger.debug('%s', msg)
+            else:
+                xcuitest_process_logger.debug('%s', m.result[1])
 
         test_results = []
         test_results_lock = threading.Lock()
