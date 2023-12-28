@@ -12,7 +12,7 @@ from tidevice._device import Device
 from tidevice.exceptions import MuxError, MuxServiceError, ServiceError
 import threading
 import queue
-from tidevice._ssl import *
+# from tidevice._ssl import *
 
 def alert(message):
     tkinter.messagebox.showinfo("", message)
@@ -176,8 +176,7 @@ class FNDeviceDebugApp:
             with d.connect_instruments() as ts:
                 pid = ts.app_launch(bunde_id,
                                     app_env=env,
-                                    args=launch_args,
-                                    kill_running=False)
+                                    args=launch_args)
                 print("PID:", pid)
         except Exception as e:
             alert(e)
