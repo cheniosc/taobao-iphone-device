@@ -17,6 +17,8 @@ import typing
 class LOG(str, enum.Enum):
     root = "tidevice"
     xcuitest = "tidevice.xctest"
+    xcuitest_process_log = "tidevice.xctest.test_process_log"
+    xcuitest_console_log = "tidevice.xctest.test_console_log"
     socket = "tidevice.socket"
 
 

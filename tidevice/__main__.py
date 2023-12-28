@@ -33,7 +33,7 @@ from ._usbmux import Usbmux
 from ._utils import is_atty
 from ._version import __version__
 from ._wdaproxy import WDAService
-from .exceptions import MuxError, MuxServiceError, ServiceError
+from .exceptions import DownloadError, MuxError, MuxServiceError, ServiceError
 
 um: Usbmux = None  # Usbmux
 logger = logging.getLogger(__name__)
@@ -248,8 +248,26 @@ def cmd_xcuitest(args: argparse.Namespace):
     """
     Run XCTest required WDA installed.
     """
-    if args.debug:
-        setup_logger(LOG.xcuitest, level=logging.DEBUG)
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    setup_logger(LOG.xcuitest, level=log_level)
+
+    if args.process_log_path:
+        logger.info('XCUITest test process log file path: %s', args.process_log_path)
+        # Use the default formatter that is a no-op formatter.
+        setup_logger(LOG.xcuitest_process_log,
+                     logfile=args.process_log_path,
+                     disableStderrLogger=True,  # Disable console logging.
+                     level=log_level,
+                     formatter=logging.Formatter())
+
+    if args.console_log_path:
+        logger.info('XCUITest test output file path: %s', args.console_log_path)
+        # Use the default formatter that is a no-op formatter.
+        setup_logger(LOG.xcuitest_console_log,
+                     logfile=args.console_log_path,
+                     disableStderrLogger=True,  # Disable console logging.
+                     level=log_level,
+                     formatter=logging.Formatter())
 
     d = _udid2device(args.udid)
     env = {}
@@ -334,12 +352,13 @@ def cmd_applist(args: argparse.Namespace):
         #         info.get('Version', ''), info['Type'])))
 
 def cmd_energy(args: argparse.Namespace):
+    if args.kill:
+        logger.warning("kill is deprecated, kill is always True now")
+        
     d = _udid2device(args.udid)
     ts = d.connect_instruments()
     try:
-        pid = ts.app_launch(args.bundle_id,
-                                       args=args.arguments,
-                                       kill_running=args.kill)
+        pid = ts.app_launch(args.bundle_id, args=args.arguments)
         ts.start_energy_sampling(pid)
         while True:
             ret = ts.get_process_energy_stats(pid)
@@ -350,24 +369,18 @@ def cmd_energy(args: argparse.Namespace):
         sys.exit(e)
 
 def cmd_launch(args: argparse.Namespace):
-    d = _udid2device(args.udid)
+    if args.skip_running:
+        logger.warning("skip_running is deprecated, always kill app now")
 
+    d = _udid2device(args.udid)
     env = {}
     for kv in args.env or []:
         key, val = kv.split(":", 1)
         env[key] = val
     if env:
         logger.info("App launch env: %s", env)
-
-    try:
-        with d.connect_instruments() as ts:
-            pid = ts.app_launch(args.bundle_id,
-                                        app_env=env,
-                                        args=args.arguments,
-                                        kill_running=not args.skip_running)
-            print("PID:", pid)
-    except ServiceError as e:
-        sys.exit(e)
+    pid = d.app_start(args.bundle_id, args=args.arguments, env=env)
+    print("PID:", pid)
 
 
 def cmd_kill(args: argparse.Namespace):
@@ -452,12 +465,12 @@ def cmd_crashreport(args: argparse.Namespace):
 
 def cmd_developer(args: argparse.Namespace):
     if args.download_all:
-        for major in range(7, 15):
-            for minor in range(0, 10):
+        for major in range(14, 17):
+            for minor in range(0, 7):
                 version = f"{major}.{minor}"
                 try:
                     cache_developer_image(version)
-                except requests.HTTPError:
+                except (requests.HTTPError, DownloadError):
                     break
         #     print("finish cache developer image {}".format(version))
     elif args.list:
@@ -881,6 +894,10 @@ _commands = [
                  help="set command line args to target app with a comma-separated list of strings"),
             dict(args=['--tests-to-run'],
                  help="specify a set of test classes or test methods to run, format: a comma-separated list of Test-Class-Name[/Test-Method-Name]"),
+            dict(args=['--process-log-path'],
+                 help='The file path to store XCUITest test process logs. By default they are not stored to a file.'),
+            dict(args=['--console-log-path'],
+                 help='The file path to store XCUITest test output, e.g. UI activity summaries. By default they are not stored to a file.'),
         ],
         help="run XCTest (XCUITest)"),
     dict(
