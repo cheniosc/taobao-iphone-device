@@ -10,8 +10,9 @@ from tidevice._usbmux import Usbmux
 from tidevice._proto import LOG, MODELS, PROGRAM_NAME, ConnectionType
 from tidevice._device import Device
 from tidevice.exceptions import MuxError, MuxServiceError, ServiceError
-import threading
-import queue
+from tidevice._relay import relay
+import threading, multiprocessing, queue, socket, time
+import requests
 # from tidevice._ssl import *
 
 def alert(message):
@@ -29,6 +30,8 @@ class FNDeviceDebugApp:
         self.syslog_service = None
         self.syslog_queue = queue.Queue()
         self.syslog_filter_entry: Entry = None
+        self.wda_process = None
+        self.mjpeg_process = None
 
     @staticmethod
     def set_win(tk, title, width=800, height=480):
@@ -170,6 +173,12 @@ class FNDeviceDebugApp:
             alert("请输入应用BundleID")
             return
 
+        ios_version = d.get_value("ProductVersion")
+        if ios_version.startswith("17."):
+            thread = threading.Thread(target=self.launch_app_by_wda, args=(bunde_id,))
+            thread.start()
+            return
+
         env = {}
         launch_args = ['-FIRAnalyticsDebugEnabled', '-FIRDebugEnabled']
         try:
@@ -180,6 +189,47 @@ class FNDeviceDebugApp:
                 print("PID:", pid)
         except Exception as e:
             alert(e)
+
+    def launch_app_by_wda(self, bundle_id):
+        data = {
+            "capabilities": {
+                "alwaysMatch": {
+                    "appium:bundleId": bundle_id,
+                    "appium:arguments": ["-FIRAnalyticsDebugEnabled", "-FIRDebugEnabled"],
+                    "appium:forceAppLaunch": "1",
+                    "appium:shouldTerminateApp": "0",
+                }
+            }
+        }
+        try:
+            res = requests.post("http://localhost:8100/session", json=data)
+        except Exception as e:
+            print(e)
+            alert("检查是否开启端口代理，是否开启手机的WebDriverAgent")
+            return
+        if res.status_code == 200:
+            # time.sleep(5)
+            requests.get("http://localhost:8100/wda/shutdown")
+        else:
+            alert(res.text)
+
+
+    def relay_port(self):
+        try:
+            d = self.get_selected_device()
+        except Exception as e:
+            alert(e)
+            return
+
+        if self.wda_process and self.wda_process.is_alive():
+            self.wda_process.terminate()
+        if self.mjpeg_process and self.mjpeg_process.is_alive():
+            self.mjpeg_process.terminate()
+        self.wda_process = multiprocessing.Process(target=start_proxy, args=(d.udid, 8100, 8100))
+        self.wda_process.start()
+        self.wda_process = multiprocessing.Process(target=start_proxy, args=(d.udid, 9100, 9100))
+        self.wda_process.start()
+        alert("开启成功")
 
     def reset_syslog_button_text(self):
         self.syslog_button.config(text="打开实时日志")
@@ -258,6 +308,9 @@ class FNDeviceDebugApp:
         entitlement_button.grid(row=row, column=2, sticky=E, padx=(0, 5))
         launch_button = Button(root, text="调试", command=self.launch_app, width=10)
         launch_button.grid(row=row, column=3, sticky=tkinter.W)
+        proxy_button = Button(root, text="手机端口代理", command=self.relay_port, width=10)
+        proxy_button.grid(row=row, column=3, sticky=tkinter.E, padx=(0, 0))
+
 
         row += 1
         yscrollbar = Scrollbar(root)
@@ -288,8 +341,16 @@ class FNDeviceDebugApp:
         self.root.mainloop()
 
 
+def start_proxy(udid, lport, rport):
+    d = Device(udid=udid)
+    relay(d, lport, rport)
+    print(f"端口转发，pc:{lport}, iphone:{rport}")
+
+
 def main():
     app = FNDeviceDebugApp()
+    print("本机局域网IP信息：")
+    print(socket.gethostbyname_ex(socket.gethostname()))
     app.show()
 
 
