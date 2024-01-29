@@ -180,7 +180,7 @@ class FNDeviceDebugApp:
             return
 
         env = {}
-        launch_args = ['-FIRAnalyticsDebugEnabled', '-FIRDebugEnabled']
+        launch_args = ['-FIRAnalyticsDebugEnabled', '-FIRDebugEnabled', '-FIRAnalyticsVerboseLoggingEnabled']
         try:
             with d.connect_instruments() as ts:
                 pid = ts.app_launch(bunde_id,
@@ -195,7 +195,8 @@ class FNDeviceDebugApp:
             "capabilities": {
                 "alwaysMatch": {
                     "appium:bundleId": bundle_id,
-                    "appium:arguments": ["-FIRAnalyticsDebugEnabled", "-FIRDebugEnabled"],
+                    "appium:arguments": ["-FIRAnalyticsDebugEnabled", "-FIRDebugEnabled",
+                                         '-FIRAnalyticsVerboseLoggingEnabled'],
                     "appium:forceAppLaunch": "1",
                     "appium:shouldTerminateApp": "0",
                 }
@@ -348,6 +349,8 @@ def start_proxy(udid, lport, rport):
 
 
 def main():
+    multiprocessing.freeze_support()
+
     app = FNDeviceDebugApp()
     print("本机局域网IP信息：")
     print(socket.gethostbyname_ex(socket.gethostname()))
