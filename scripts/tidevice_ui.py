@@ -13,6 +13,9 @@ from tidevice.exceptions import MuxError, MuxServiceError, ServiceError
 from tidevice._relay import relay
 import threading, multiprocessing, queue, socket, time
 import requests
+from pymobiledevice3.remote.utils import get_tunneld_devices
+from pymobiledevice3.services.dvt.dvt_secure_socket_proxy import DvtSecureSocketProxyService
+from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
 # from tidevice._ssl import *
 
 def alert(message):
@@ -32,6 +35,7 @@ class FNDeviceDebugApp:
         self.syslog_filter_entry: Entry = None
         self.wda_process = None
         self.mjpeg_process = None
+
 
     @staticmethod
     def set_win(tk, title, width=800, height=480):
@@ -175,8 +179,20 @@ class FNDeviceDebugApp:
 
         ios_version = d.get_value("ProductVersion")
         if ios_version.startswith("17."):
-            thread = threading.Thread(target=self.launch_app_by_wda, args=(bunde_id,))
-            thread.start()
+            try:
+                rsds = get_tunneld_devices()
+            except Exception as e:
+                alert("请先管理员权限运行create_ipv6_tunnel")
+                return
+
+            for rsd in rsds:
+                if rsd.udid == d.udid:
+                    self.launch_app_by_rsd(rsd, bunde_id)
+                    break
+
+            # 通过wda的方式启动iOS 17的程序
+            # thread = threading.Thread(target=self.launch_app_by_wda, args=(bunde_id,))
+            # thread.start()
             return
 
         env = {}
@@ -189,6 +205,18 @@ class FNDeviceDebugApp:
                 print("PID:", pid)
         except Exception as e:
             alert(e)
+
+    def launch_app_by_rsd(self, rsd, bundle_id):
+        dvt = DvtSecureSocketProxyService(rsd)
+        dvt.perform_handshake()
+        process_control = ProcessControl(dvt)
+        launch_args = ['-FIRAnalyticsDebugEnabled', '-FIRDebugEnabled', '-FIRAnalyticsVerboseLoggingEnabled']
+        try:
+            result = process_control.launch(bundle_id, launch_args, True)
+            print(result)
+        except Exception as e:
+            alert(e)
+        dvt.close()
 
     def launch_app_by_wda(self, bundle_id):
         data = {
