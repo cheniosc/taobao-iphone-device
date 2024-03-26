@@ -13,10 +13,7 @@ from tidevice.exceptions import MuxError, MuxServiceError, ServiceError
 from tidevice._relay import relay
 import threading, multiprocessing, queue, socket, time
 import requests
-from pymobiledevice3.remote.utils import get_tunneld_devices
-from pymobiledevice3.services.dvt.dvt_secure_socket_proxy import DvtSecureSocketProxyService
-from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
-# from tidevice._ssl import *
+
 
 def alert(message):
     tkinter.messagebox.showinfo("", message)
@@ -179,6 +176,7 @@ class FNDeviceDebugApp:
 
         ios_version = d.get_value("ProductVersion")
         if ios_version.startswith("17."):
+            from pymobiledevice3.remote.utils import get_tunneld_devices
             try:
                 rsds = get_tunneld_devices()
             except Exception as e:
@@ -207,6 +205,8 @@ class FNDeviceDebugApp:
             alert(e)
 
     def launch_app_by_rsd(self, rsd, bundle_id):
+        from pymobiledevice3.services.dvt.dvt_secure_socket_proxy import DvtSecureSocketProxyService
+        from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
         dvt = DvtSecureSocketProxyService(rsd)
         dvt.perform_handshake()
         process_control = ProcessControl(dvt)
