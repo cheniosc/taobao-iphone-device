@@ -30,6 +30,7 @@ class FNDeviceDebugApp:
         self.syslog_service = None
         self.syslog_queue = queue.Queue()
         self.syslog_filter_entry: Entry = None
+        self.proxy_button = None
         self.wda_process = None
         self.mjpeg_process = None
 
@@ -176,21 +177,23 @@ class FNDeviceDebugApp:
 
         ios_version = d.get_value("ProductVersion")
         if ios_version.startswith("17."):
-            from pymobiledevice3.remote.utils import get_tunneld_devices
-            try:
-                rsds = get_tunneld_devices()
-            except Exception as e:
-                alert("请先管理员权限运行create_ipv6_tunnel")
-                return
+            # 开启了WDA端口转发，则走WDA启动
+            if self.wda_process and self.wda_process.is_alive():
+                thread = threading.Thread(target=self.launch_app_by_wda, args=(bunde_id,))
+                thread.start()
+            else:
+                from pymobiledevice3.remote.utils import get_tunneld_devices
+                try:
+                    rsds = get_tunneld_devices()
+                except Exception as e:
+                    alert("请先管理员权限运行create_ipv6_tunnel")
+                    return
 
-            for rsd in rsds:
-                if rsd.udid == d.udid:
-                    self.launch_app_by_rsd(rsd, bunde_id)
-                    break
+                for rsd in rsds:
+                    if rsd.udid == d.udid:
+                        self.launch_app_by_rsd(rsd, bunde_id)
+                        break
 
-            # 通过wda的方式启动iOS 17的程序
-            # thread = threading.Thread(target=self.launch_app_by_wda, args=(bunde_id,))
-            # thread.start()
             return
 
         env = {}
@@ -244,6 +247,12 @@ class FNDeviceDebugApp:
 
 
     def relay_port(self):
+        if self.proxy_button.cget("text") == "关闭端口代理":
+            self.wda_process.terminate()
+            self.mjpeg_process.terminate()
+            self.proxy_button.config(text="手机端口代理")
+            return
+
         try:
             d = self.get_selected_device()
         except Exception as e:
@@ -256,8 +265,9 @@ class FNDeviceDebugApp:
             self.mjpeg_process.terminate()
         self.wda_process = multiprocessing.Process(target=start_proxy, args=(d.udid, 8100, 8100))
         self.wda_process.start()
-        self.wda_process = multiprocessing.Process(target=start_proxy, args=(d.udid, 9100, 9100))
-        self.wda_process.start()
+        self.mjpeg_process = multiprocessing.Process(target=start_proxy, args=(d.udid, 9100, 9100))
+        self.mjpeg_process.start()
+        self.proxy_button.config(text="关闭端口代理")
         alert("开启成功")
 
     def reset_syslog_button_text(self):
@@ -269,7 +279,7 @@ class FNDeviceDebugApp:
             self.syslog_service.close()
         else:
             self.syslog_button.config(text="关闭实时日志")
-            thread = threading.Thread(target=self.sys_log)
+            thread = threading.Thread(target=self.py3_sys_log)
             thread.start()
 
     def sys_log(self):
@@ -292,6 +302,37 @@ class FNDeviceDebugApp:
             self.syslog_service = None
             self.reset_syslog_button_text()
         except (BrokenPipeError, IOError):
+            self.syslog_service = None
+            self.reset_syslog_button_text()
+
+    def py3_sys_log(self):
+        from pymobiledevice3.lockdown import create_using_usbmux
+        from pymobiledevice3.services.os_trace import OsTraceService, SyslogEntry
+        import posixpath
+        lockdown = create_using_usbmux()
+        try:
+            self.syslog_service = OsTraceService(lockdown=lockdown)
+            for syslog_entry in self.syslog_service.syslog():
+                syslog_pid = syslog_entry.pid
+                timestamp = syslog_entry.timestamp
+                level = syslog_entry.level.name
+                filename = syslog_entry.filename
+                image_name = posixpath.basename(syslog_entry.image_name)
+                message = syslog_entry.message
+                process_name = posixpath.basename(filename)
+                label = ''
+                line_format = '{timestamp} {process_name}{{{image_name}}}[{pid}] <{level}>: {message}\n'
+                line = line_format.format(timestamp=timestamp, process_name=process_name, image_name=image_name,
+                                          pid=syslog_pid,
+                                          level=level, message=message)
+
+                syslog_filter = self.syslog_filter_entry.get()
+                if syslog_filter == '' or line.find(syslog_filter) != -1:
+                    self.syslog_queue.put(line+"\n")
+
+            self.syslog_service = None
+            self.reset_syslog_button_text()
+        except Exception:
             self.syslog_service = None
             self.reset_syslog_button_text()
 
@@ -337,8 +378,8 @@ class FNDeviceDebugApp:
         entitlement_button.grid(row=row, column=2, sticky=E, padx=(0, 5))
         launch_button = Button(root, text="调试", command=self.launch_app, width=10)
         launch_button.grid(row=row, column=3, sticky=tkinter.W)
-        proxy_button = Button(root, text="手机端口代理", command=self.relay_port, width=10)
-        proxy_button.grid(row=row, column=3, sticky=tkinter.E, padx=(0, 0))
+        self.proxy_button = Button(root, text="手机端口代理", command=self.relay_port, width=10)
+        self.proxy_button.grid(row=row, column=3, sticky=tkinter.E, padx=(0, 0))
 
 
         row += 1
