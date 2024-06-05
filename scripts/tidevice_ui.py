@@ -1,20 +1,24 @@
 # -*- coding: utf-8 -*-
 # @Author: Cheniosc
 # @Date: 2023/8/11
-
+import os, datetime, posixpath
 import tkinter.messagebox
 from tkinter import *
-from tkinter import ttk
-from typing import Optional, Union
+from tkinter import ttk, filedialog
+from typing import Optional
 from tidevice._usbmux import Usbmux
-from tidevice._proto import LOG, MODELS, PROGRAM_NAME, ConnectionType
+from tidevice._proto import MODELS, ConnectionType
 from tidevice._device import Device
-from tidevice.exceptions import MuxError, MuxServiceError, ServiceError
+from tidevice.exceptions import MuxError
 from tidevice._relay import relay
-import threading, multiprocessing, queue, socket, time
+import threading, multiprocessing, queue, socket
 import requests
-
-
+from pymobiledevice3.tunneld import get_tunneld_devices
+from pymobiledevice3.services.dvt.dvt_secure_socket_proxy import DvtSecureSocketProxyService
+from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
+from pymobiledevice3.lockdown import create_using_usbmux
+from pymobiledevice3.services.os_trace import OsTraceService, SyslogEntry
+from pymobiledevice3.services.dvt.instruments.screenshot import Screenshot
 def alert(message):
     tkinter.messagebox.showinfo("", message)
 
@@ -33,7 +37,7 @@ class FNDeviceDebugApp:
         self.proxy_button = None
         self.wda_process = None
         self.mjpeg_process = None
-
+        self.syslog_save_dir = os.getcwd()
 
     @staticmethod
     def set_win(tk, title, width=800, height=480):
@@ -144,6 +148,31 @@ class FNDeviceDebugApp:
 
         return bundle
 
+    def screenshot(self):
+        d = self.get_selected_device()
+        now = datetime.datetime.now()
+        time_str = now.strftime('%Y%m%d%H%M%S')
+        os.getcwd()
+        image_file_path = os.path.join(os.getcwd(), "screenshot"+time_str+".png")
+        ios_version = d.get_value("ProductVersion")
+        version = list(map(int, ios_version.split('.')))
+        if len(version) > 0 and version[0] >= 17:
+            try:
+                rsds = get_tunneld_devices()
+            except Exception as e:
+                alert("请先管理员权限运行create_ipv6_tunnel")
+                return
+
+            for rsd in rsds:
+                if rsd.udid == d.udid:
+                    with DvtSecureSocketProxyService(lockdown=rsd) as dvt:
+                        with open(image_file_path, 'wb') as file:
+                            file.write(Screenshot(dvt).get_screenshot())
+
+        else:
+            d.screenshot().convert("RGB").save(image_file_path)
+        print("Screenshot saved to", image_file_path)
+
     def show_entitlements(self):
         try:
             d = self.get_selected_device()
@@ -176,13 +205,13 @@ class FNDeviceDebugApp:
             return
 
         ios_version = d.get_value("ProductVersion")
-        if ios_version.startswith("17."):
+        version = list(map(int, ios_version.split('.')))
+        if len(version) > 0 and version[0] >= 17:
             # 开启了WDA端口转发，则走WDA启动
             if self.wda_process and self.wda_process.is_alive():
                 thread = threading.Thread(target=self.launch_app_by_wda, args=(bunde_id,))
                 thread.start()
             else:
-                from pymobiledevice3.remote.utils import get_tunneld_devices
                 try:
                     rsds = get_tunneld_devices()
                 except Exception as e:
@@ -208,8 +237,6 @@ class FNDeviceDebugApp:
             alert(e)
 
     def launch_app_by_rsd(self, rsd, bundle_id):
-        from pymobiledevice3.services.dvt.dvt_secure_socket_proxy import DvtSecureSocketProxyService
-        from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
         dvt = DvtSecureSocketProxyService(rsd)
         dvt.perform_handshake()
         process_control = ProcessControl(dvt)
@@ -244,7 +271,6 @@ class FNDeviceDebugApp:
             requests.get("http://localhost:8100/wda/shutdown")
         else:
             alert(res.text)
-
 
     def relay_port(self):
         if self.proxy_button.cget("text") == "关闭端口代理":
@@ -306,9 +332,6 @@ class FNDeviceDebugApp:
             self.reset_syslog_button_text()
 
     def py3_sys_log(self):
-        from pymobiledevice3.lockdown import create_using_usbmux
-        from pymobiledevice3.services.os_trace import OsTraceService, SyslogEntry
-        import posixpath
         lockdown = create_using_usbmux()
         try:
             self.syslog_service = OsTraceService(lockdown=lockdown)
@@ -336,6 +359,28 @@ class FNDeviceDebugApp:
             self.syslog_service = None
             self.reset_syslog_button_text()
 
+    def save_syslog(self):
+        now = datetime.datetime.now()
+        # 格式化当前时间为 yyyymmddhhiiss
+        time_str = now.strftime('%Y%m%d%H%M%S')
+        file_path = filedialog.asksaveasfilename(
+            initialfile= "log"+time_str+".txt",
+            initialdir=self.syslog_save_dir,
+            defaultextension=".txt",  # 默认文件扩展名
+            filetypes=[("Text files", "*.txt")],  # 文件类型过滤器
+            title="保存"
+        )
+
+        # 如果用户选择了文件路径
+        if file_path:
+            self.syslog_save_dir = os.path.dirname(file_path)
+            try:
+                # 打开文件并写入内容
+                with open(file_path, 'w') as file:
+                    file.write(self.syslog_text.get("1.0", tkinter.END))
+            except Exception as e:
+                print(f"Error saving file: {e}")
+
     def check_queue(self):
         while not self.syslog_queue.empty():
             lines = []
@@ -359,27 +404,31 @@ class FNDeviceDebugApp:
         self.set_win(root, 'iOS调试工具', 800, 480)
 
         row = 0
-        device_label = Label(root, text="设备：")
-        device_label.grid(row=row, column=2, sticky=tkinter.E)
+        device_label = Label(root, text="设备：", anchor=E)
+        device_label.grid(row=row, column=1, sticky=E+W)
         self.device_combobox = ttk.Combobox(root, state="readonly")
         self.update_combobox_data()
-        self.device_combobox.grid(row=row, column=3, columnspan=2, sticky=tkinter.W)
+        self.device_combobox.grid(row=row, column=2, sticky=tkinter.W+E)
         self.device_combobox.bind("<Button-1>", self.update_combobox_data)
 
         row += 1
         bundle_label = Label(root, text="应用BundleID：")
-        bundle_label.grid(row=row, column=2, sticky=tkinter.E)
+        bundle_label.grid(row=row, column=1, sticky=tkinter.E)
         self.bundle_combobox = ttk.Combobox(root)
-        self.bundle_combobox.grid(row=row, column=3, columnspan=2, sticky=tkinter.W)
+        self.bundle_combobox.grid(row=row, column=2, columnspan=1, sticky=tkinter.W+E)
         self.bundle_combobox.bind("<Button-1>", self.update_bundle_data)
+        launch_button = Button(root, text="启动应用", command=self.launch_app)
+        launch_button.grid(row=row, column=3, sticky=tkinter.W+E)
 
         row += 1
         entitlement_button = Button(root, text="查看应用权限", command=self.show_entitlements, width=10)
-        entitlement_button.grid(row=row, column=2, sticky=E, padx=(0, 5))
-        launch_button = Button(root, text="调试", command=self.launch_app, width=10)
-        launch_button.grid(row=row, column=3, sticky=tkinter.W)
+        entitlement_button.grid(row=row, column=1, sticky=E+W)
+        screenshot_button = Button(root, text="截图", command=self.screenshot, width=10)
+        screenshot_button.grid(row=row, column=2, sticky=W+E)
+        # launch_button = Button(root, text="启动应用", command=self.launch_app, width=10)
+        # launch_button.grid(row=row, column=3, sticky=tkinter.W)
         self.proxy_button = Button(root, text="手机端口代理", command=self.relay_port, width=10)
-        self.proxy_button.grid(row=row, column=3, sticky=tkinter.E, padx=(0, 0))
+        self.proxy_button.grid(row=row, column=3, sticky=tkinter.E+W)
 
 
         row += 1
@@ -393,16 +442,18 @@ class FNDeviceDebugApp:
         xscrollbar.config(command=self.syslog_text.xview)
 
         row += 8
-        syslog_filter_label = Label(root, text="日志过滤：", )
-        syslog_filter_label.grid(row=row, column=2, sticky=tkinter.E)
+        syslog_filter_label = Label(root, text="日志过滤：", anchor=E)
+        syslog_filter_label.grid(row=row, column=1, sticky=tkinter.E+W)
         self.syslog_filter_entry = Entry(root)
-        self.syslog_filter_entry.grid(row=row, column=3, sticky=tkinter.W)
+        self.syslog_filter_entry.grid(row=row, column=2, sticky=tkinter.W+E)
 
         row += 1
         clear_text_button = Button(root, text="清除日志", command=self.clear_text, width=10)
-        clear_text_button.grid(row=row, column=2, sticky=E, padx=(0, 5))
+        clear_text_button.grid(row=row, column=1, sticky=E+W)
         self.syslog_button = Button(root, text="打开实时日志", command=self.toggle_syslog, width=10)
-        self.syslog_button.grid(row=row, column=3, sticky=W)
+        self.syslog_button.grid(row=row, column=2, sticky=W+E)
+        save_syslog_button = Button(root, text="保存日志", command=self.save_syslog, width=10)
+        save_syslog_button.grid(row=row, column=3, sticky=tkinter.E+W)
 
         for i in range(7):
             root.columnconfigure(i, weight=1)

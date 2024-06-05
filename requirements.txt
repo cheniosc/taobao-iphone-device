@@ -8,6 +8,7 @@
 # requests; python_version >= '3.6'
 # requests; sys_platform == 'win32'
 
+pyopenssl==24.0.0; sys_platform == 'win32'
 Pillow
 requests
 colored
@@ -20,4 +21,4 @@ simplejson
 tabulate
 logzero
 deprecation
-pymobiledevice3
+pymobiledevice3==4.8.9
