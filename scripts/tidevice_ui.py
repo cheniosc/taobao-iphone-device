@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # @Author: Cheniosc
 # @Date: 2023/8/11
-import os, datetime, posixpath
+import os, datetime, posixpath, codecs
 import tkinter.messagebox
 from tkinter import *
 from tkinter import ttk, filedialog
@@ -13,12 +13,14 @@ from tidevice.exceptions import MuxError
 from tidevice._relay import relay
 import threading, multiprocessing, queue, socket
 import requests
-from pymobiledevice3.tunneld import get_tunneld_devices
+from pymobiledevice3.tunneld import get_tunneld_devices, async_get_tunneld_devices
 from pymobiledevice3.services.dvt.dvt_secure_socket_proxy import DvtSecureSocketProxyService
 from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
 from pymobiledevice3.lockdown import create_using_usbmux
 from pymobiledevice3.services.os_trace import OsTraceService, SyslogEntry
 from pymobiledevice3.services.dvt.instruments.screenshot import Screenshot
+
+
 def alert(message):
     tkinter.messagebox.showinfo("", message)
 
@@ -137,6 +139,7 @@ class FNDeviceDebugApp:
 
         udid = self.find_device_udid(device_name)
         d = self.udid2device(udid)
+        print("Selected Device UDID: "+udid)
         return d
 
     def get_selected_bundleid(self):
@@ -173,6 +176,26 @@ class FNDeviceDebugApp:
             d.screenshot().convert("RGB").save(image_file_path)
         print("Screenshot saved to", image_file_path)
 
+    def install_app(self):
+        ipa_path = filedialog.askopenfilename(filetypes=[("IPA files", "*.ipa")])
+        if ipa_path:
+            print("Selected file:", ipa_path)
+            install_thread = threading.Thread(target=self.install_app_in_thread, args=(ipa_path,))
+            install_thread.start()
+
+    def install_app_in_thread(self, ipa_path):
+        try:
+            d = self.get_selected_device()
+        except Exception as e:
+            alert(e)
+            return
+
+        # 在新线程中执行安装应用程序的函数
+        try:
+            d.app_install(ipa_path)
+        except Exception as e:
+            print("install app error: " + str(e))
+
     def show_entitlements(self):
         try:
             d = self.get_selected_device()
@@ -180,12 +203,12 @@ class FNDeviceDebugApp:
             alert(e)
             return
 
-        bunde_id = self.get_selected_bundleid()
-        if bunde_id == '':
+        bundle_id = self.get_selected_bundleid()
+        if bundle_id == '':
             alert("请输入应用BundleID")
             return
 
-        info = d.installation.lookup(bunde_id)
+        info = d.installation.lookup(bundle_id)
         if info is None and 'Entitlements' not in info:
             alert("查不到相关权限信息")
             return
@@ -199,8 +222,8 @@ class FNDeviceDebugApp:
             alert(e)
             return
 
-        bunde_id = self.get_selected_bundleid()
-        if bunde_id == '':
+        bundle_id = self.get_selected_bundleid()
+        if bundle_id == '':
             alert("请输入应用BundleID")
             return
 
@@ -209,19 +232,11 @@ class FNDeviceDebugApp:
         if len(version) > 0 and version[0] >= 17:
             # 开启了WDA端口转发，则走WDA启动
             if self.wda_process and self.wda_process.is_alive():
-                thread = threading.Thread(target=self.launch_app_by_wda, args=(bunde_id,))
+                thread = threading.Thread(target=self.launch_app_by_wda, args=(bundle_id,))
                 thread.start()
             else:
-                try:
-                    rsds = get_tunneld_devices()
-                except Exception as e:
-                    alert("请先管理员权限运行create_ipv6_tunnel")
-                    return
-
-                for rsd in rsds:
-                    if rsd.udid == d.udid:
-                        self.launch_app_by_rsd(rsd, bunde_id)
-                        break
+                thread = threading.Thread(target=self.launch_app_by_rsd, args=(bundle_id, d.udid))
+                thread.start()
 
             return
 
@@ -229,24 +244,35 @@ class FNDeviceDebugApp:
         launch_args = ['-FIRAnalyticsDebugEnabled', '-FIRDebugEnabled', '-FIRAnalyticsVerboseLoggingEnabled']
         try:
             with d.connect_instruments() as ts:
-                pid = ts.app_launch(bunde_id,
+                pid = ts.app_launch(bundle_id,
                                     app_env=env,
                                     args=launch_args)
                 print("PID:", pid)
         except Exception as e:
             alert(e)
 
-    def launch_app_by_rsd(self, rsd, bundle_id):
-        dvt = DvtSecureSocketProxyService(rsd)
-        dvt.perform_handshake()
-        process_control = ProcessControl(dvt)
-        launch_args = ['-FIRAnalyticsDebugEnabled', '-FIRDebugEnabled', '-FIRAnalyticsVerboseLoggingEnabled']
+    def launch_app_by_rsd(self, bundle_id, udid):
         try:
-            result = process_control.launch(bundle_id, launch_args, True)
-            print(result)
+            # rsds = async_get_tunneld_devices()
+            rsds = get_tunneld_devices()
         except Exception as e:
-            alert(e)
-        dvt.close()
+            alert("请先管理员权限运行create_ipv6_tunnel")
+            return
+
+        for rsd in rsds:
+            if rsd.udid == udid:
+                dvt = DvtSecureSocketProxyService(rsd)
+                dvt.perform_handshake()
+                process_control = ProcessControl(dvt)
+                launch_args = ['-FIRAnalyticsDebugEnabled', '-FIRDebugEnabled', '-FIRAnalyticsVerboseLoggingEnabled']
+                try:
+                    result = process_control.launch(bundle_id, launch_args, True)
+                    print(result)
+                except Exception as e:
+                    alert(e)
+                dvt.close()
+                break
+
 
     def launch_app_by_wda(self, bundle_id):
         data = {
@@ -376,8 +402,9 @@ class FNDeviceDebugApp:
             self.syslog_save_dir = os.path.dirname(file_path)
             try:
                 # 打开文件并写入内容
-                with open(file_path, 'w') as file:
+                with codecs.open(file_path, 'w', 'utf-8') as file:
                     file.write(self.syslog_text.get("1.0", tkinter.END))
+
             except Exception as e:
                 print(f"Error saving file: {e}")
 
@@ -410,6 +437,8 @@ class FNDeviceDebugApp:
         self.update_combobox_data()
         self.device_combobox.grid(row=row, column=2, sticky=tkinter.W+E)
         self.device_combobox.bind("<Button-1>", self.update_combobox_data)
+        install_button = Button(root, text="安装ipa", command=self.install_app)
+        install_button.grid(row=row, column=3, sticky=tkinter.W+E)
 
         row += 1
         bundle_label = Label(root, text="应用BundleID：")

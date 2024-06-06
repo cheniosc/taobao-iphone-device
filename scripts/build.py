@@ -21,7 +21,8 @@ PyInstaller.__main__.run([
     '--hidden-import=readchar',
     '--copy-metadata=pyimg4',
     '--copy-metadata=readchar',
-    '--copy-metadata=apple_compress',
+    # '--copy-metadata=apple_compress',
+    # '--add-binary', f"{site_packages_path}/pytun_pmd3/*;pytun_pmd3",  # 用*这种会报缺少wintun驱动
     '--add-binary', f"{site_packages_path}/pytun_pmd3/*;pytun_pmd3",
     '--onefile'
 ])
@@ -38,8 +39,9 @@ PyInstaller.__main__.run([
     '--hidden-import=readchar',
     '--copy-metadata=pyimg4',
     '--copy-metadata=readchar',
-    '--copy-metadata=apple_compress',
-    '--add-binary', f"{site_packages_path}/pytun_pmd3/*;pytun_pmd3",
+    # '--copy-metadata=apple_compress',
+    # '--add-binary', f"{site_packages_path}/pytun_pmd3/*;pytun_pmd3", # 用*这种会报缺少wintun驱动
+    '--add-binary', f"{site_packages_path}/pytun_pmd3/;pytun_pmd3",
     '--onefile'
 ])
 
