@@ -2,6 +2,7 @@
 # @Author: Cheniosc
 # @Date: 2023/8/11
 import os, datetime, posixpath, codecs
+import subprocess
 import tkinter.messagebox
 from tkinter import *
 from tkinter import ttk, filedialog
@@ -39,6 +40,7 @@ class FNDeviceDebugApp:
         self.proxy_button = None
         self.wda_process = None
         self.mjpeg_process = None
+        self.goios_process = None
         self.syslog_save_dir = os.getcwd()
 
     @staticmethod
@@ -241,7 +243,7 @@ class FNDeviceDebugApp:
             return
 
         env = {}
-        launch_args = ['-FIRAnalyticsDebugEnabled', '-FIRDebugEnabled', '-FIRAnalyticsVerboseLoggingEnabled']
+        launch_args = ['fnShowLog', '-FIRAnalyticsDebugEnabled', '-FIRDebugEnabled', '-FIRAnalyticsVerboseLoggingEnabled']
         try:
             with d.connect_instruments() as ts:
                 pid = ts.app_launch(bundle_id,
@@ -263,8 +265,9 @@ class FNDeviceDebugApp:
             if rsd.udid == udid:
                 dvt = DvtSecureSocketProxyService(rsd)
                 dvt.perform_handshake()
+
                 process_control = ProcessControl(dvt)
-                launch_args = ['-FIRAnalyticsDebugEnabled', '-FIRDebugEnabled', '-FIRAnalyticsVerboseLoggingEnabled']
+                launch_args = ['fnShowLog', '-FIRAnalyticsDebugEnabled', '-FIRDebugEnabled', '-FIRAnalyticsVerboseLoggingEnabled']
                 try:
                     result = process_control.launch(bundle_id, launch_args, True)
                     print(result)
@@ -272,6 +275,41 @@ class FNDeviceDebugApp:
                     alert(e)
                 dvt.close()
                 break
+
+    def launch_app_by_goios(self, bundle_id, udid):
+        goios_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ios.exe")
+        if not os.path.exists(goios_path):
+            alert("GoiOS可执行文件不存在")
+            return
+        
+        try:
+            cmd = [goios_path, "launch", bundle_id, "--kill-existing"]
+            launch_args = ['fnShowLog', '-FIRAnalyticsDebugEnabled', '-FIRDebugEnabled', '-FIRAnalyticsVerboseLoggingEnabled']
+            for arg in launch_args:
+                cmd.append("--arg=\""+arg+"\"")
+            cmd.append("--udid=\""+udid+"\"")
+            # 使用 GoiOS 启动应用，需要等待命令执行结果
+            result = subprocess.run(cmd, 
+                                  capture_output=True, 
+                                  text=True, 
+                                  timeout=30)  # 设置30秒超时
+            
+            if result.returncode == 0:
+                print(f"GoiOS启动应用成功: {bundle_id}")
+                if result.stdout:
+                    print(f"输出: {result.stdout}")
+                alert("应用启动成功")
+            else:
+                print(f"GoiOS启动应用失败: {result.stderr}")
+                alert(f"应用启动失败: {result.stderr}")
+                
+        except subprocess.TimeoutExpired:
+            alert("启动应用超时，请检查设备连接")
+        except FileNotFoundError:
+            alert("GoiOS可执行文件不存在")
+        except Exception as e:
+            print(f"启动应用时发生错误: {str(e)}")
+            alert(f"启动应用失败: {str(e)}")
 
 
     def launch_app_by_wda(self, bundle_id):
@@ -497,12 +535,43 @@ def start_proxy(udid, lport, rport):
     print(f"端口转发，pc:{lport}, iphone:{rport}")
 
 
+def check_goios():
+    goios_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ios.exe")
+    if not os.path.exists(goios_path):
+        return False
+    return True
+
+def start_goios():
+    goios_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ios.exe")
+    if not os.path.exists(goios_path):
+        return
+    
+    try:
+        # 运行 ios.exe tunnel start 命令作为后台进程（长驻服务）
+        process = subprocess.Popen([goios_path, "tunnel", "start"], 
+                                 stdout=subprocess.PIPE, 
+                                 stderr=subprocess.PIPE,
+                                 text=True)
+        print(f"GoiOS tunnel service started with PID: {process.pid}")
+        return process
+    except FileNotFoundError:
+        print(f"GoiOS executable not found at: {goios_path}")
+    except Exception as e:
+        print(f"Error starting GoiOS tunnel: {str(e)}")
+    return None
+
 def main():
     multiprocessing.freeze_support()
 
     app = FNDeviceDebugApp()
     print("本机局域网IP信息：")
     print(socket.gethostbyname_ex(socket.gethostname()))
+    if check_goios():
+        # 直接启动 GoiOS tunnel 服务，不需要用 multiprocessing
+        goios_process = start_goios()
+        if goios_process:
+            app.goios_process = goios_process
+
     app.show()
 
 
