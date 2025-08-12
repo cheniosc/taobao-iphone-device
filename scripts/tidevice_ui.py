@@ -233,7 +233,10 @@ class FNDeviceDebugApp:
         version = list(map(int, ios_version.split('.')))
         if len(version) > 0 and version[0] >= 17:
             # 开启了WDA端口转发，则走WDA启动
-            if self.wda_process and self.wda_process.is_alive():
+            if self.goios_process and self.goios_process.is_alive():
+                thread = threading.Thread(target=self.launch_app_by_goios, args=(bundle_id, d.udid))
+                thread.start()
+            elif self.wda_process and self.wda_process.is_alive():
                 thread = threading.Thread(target=self.launch_app_by_wda, args=(bundle_id,))
                 thread.start()
             else:
