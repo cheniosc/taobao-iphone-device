@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # @Author: Cheniosc
 # @Date: 2023/8/11
-import os, datetime, posixpath, codecs
+import os, datetime, posixpath, codecs, sys
 import subprocess
 import tkinter.messagebox
 from tkinter import *
@@ -14,12 +14,17 @@ from tidevice.exceptions import MuxError
 from tidevice._relay import relay
 import threading, multiprocessing, queue, socket
 import requests
-from pymobiledevice3.tunneld import get_tunneld_devices, async_get_tunneld_devices
-from pymobiledevice3.services.dvt.dvt_secure_socket_proxy import DvtSecureSocketProxyService
-from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
-from pymobiledevice3.lockdown import create_using_usbmux
-from pymobiledevice3.services.os_trace import OsTraceService, SyslogEntry
-from pymobiledevice3.services.dvt.instruments.screenshot import Screenshot
+
+
+try:
+    # from pymobiledevice3.tunneld import get_tunneld_devices, async_get_tunneld_devices
+    # from pymobiledevice3.services.dvt.dvt_secure_socket_proxy import DvtSecureSocketProxyService
+    # from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
+    from pymobiledevice3.lockdown import create_using_usbmux
+    from pymobiledevice3.services.os_trace import OsTraceService
+    # from pymobiledevice3.services.dvt.instruments.screenshot import Screenshot
+except Exception as e:
+    print(e)
 
 
 def alert(message):
@@ -163,16 +168,39 @@ class FNDeviceDebugApp:
         version = list(map(int, ios_version.split('.')))
         if len(version) > 0 and version[0] >= 17:
             try:
-                rsds = get_tunneld_devices()
-            except Exception as e:
-                alert("请先管理员权限运行create_ipv6_tunnel")
-                return
+                goios_path = get_goios_path()
+                cmd = [goios_path, "screenshot", "--udid=" + d.udid, "--output=" + image_file_path]
+                # 使用 GoiOS 启动应用，需要等待命令执行结果
+                result = subprocess.run(cmd,
+                                        capture_output=True,
+                                        text=True,
+                                        timeout=10)  # 设置30秒超时
 
-            for rsd in rsds:
-                if rsd.udid == d.udid:
-                    with DvtSecureSocketProxyService(lockdown=rsd) as dvt:
-                        with open(image_file_path, 'wb') as file:
-                            file.write(Screenshot(dvt).get_screenshot())
+                if result.returncode == 0:
+                    print(f"GoiOS截图成功")
+                    if result.stdout:
+                        print(f"输出: {result.stdout}")
+                else:
+                    print(f"GoiOS截图失败: {result.stderr}")
+
+            except subprocess.TimeoutExpired:
+                alert("截图超时，请检查设备连接")
+            except FileNotFoundError:
+                alert("GoiOS可执行文件不存在")
+            except Exception as e:
+                print(f"截图发生错误: {str(e)}")
+                alert(f"截图失败: {str(e)}")
+            # try:
+            #     rsds = get_tunneld_devices()
+            # except Exception as e:
+            #     alert("请先管理员权限运行create_ipv6_tunnel")
+            #     return
+            #
+            # for rsd in rsds:
+            #     if rsd.udid == d.udid:
+            #         with DvtSecureSocketProxyService(lockdown=rsd) as dvt:
+            #             with open(image_file_path, 'wb') as file:
+            #                 file.write(Screenshot(dvt).get_screenshot())
 
         else:
             d.screenshot().convert("RGB").save(image_file_path)
@@ -233,15 +261,14 @@ class FNDeviceDebugApp:
         version = list(map(int, ios_version.split('.')))
         if len(version) > 0 and version[0] >= 17:
             # 开启了WDA端口转发，则走WDA启动
-            if self.goios_process and self.goios_process.is_alive():
-                thread = threading.Thread(target=self.launch_app_by_goios, args=(bundle_id, d.udid))
-                thread.start()
-            elif self.wda_process and self.wda_process.is_alive():
+            if self.wda_process and self.wda_process.is_alive():
                 thread = threading.Thread(target=self.launch_app_by_wda, args=(bundle_id,))
                 thread.start()
             else:
-                thread = threading.Thread(target=self.launch_app_by_rsd, args=(bundle_id, d.udid))
+                thread = threading.Thread(target=self.launch_app_by_goios, args=(bundle_id, d.udid))
                 thread.start()
+                # thread = threading.Thread(target=self.launch_app_by_rsd, args=(bundle_id, d.udid))
+                # thread.start()
 
             return
 
@@ -256,31 +283,31 @@ class FNDeviceDebugApp:
         except Exception as e:
             alert(e)
 
-    def launch_app_by_rsd(self, bundle_id, udid):
-        try:
-            # rsds = async_get_tunneld_devices()
-            rsds = get_tunneld_devices()
-        except Exception as e:
-            alert("请先管理员权限运行create_ipv6_tunnel")
-            return
-
-        for rsd in rsds:
-            if rsd.udid == udid:
-                dvt = DvtSecureSocketProxyService(rsd)
-                dvt.perform_handshake()
-
-                process_control = ProcessControl(dvt)
-                launch_args = ['fnShowLog', '-FIRAnalyticsDebugEnabled', '-FIRDebugEnabled', '-FIRAnalyticsVerboseLoggingEnabled']
-                try:
-                    result = process_control.launch(bundle_id, launch_args, True)
-                    print(result)
-                except Exception as e:
-                    alert(e)
-                dvt.close()
-                break
+    # def launch_app_by_rsd(self, bundle_id, udid):
+    #     try:
+    #         # rsds = async_get_tunneld_devices()
+    #         rsds = get_tunneld_devices()
+    #     except Exception as e:
+    #         alert("请先管理员权限运行create_ipv6_tunnel")
+    #         return
+    #
+    #     for rsd in rsds:
+    #         if rsd.udid == udid:
+    #             dvt = DvtSecureSocketProxyService(rsd)
+    #             dvt.perform_handshake()
+    #
+    #             process_control = ProcessControl(dvt)
+    #             launch_args = ['fnShowLog', '-FIRAnalyticsDebugEnabled', '-FIRDebugEnabled', '-FIRAnalyticsVerboseLoggingEnabled']
+    #             try:
+    #                 result = process_control.launch(bundle_id, launch_args, True)
+    #                 print(result)
+    #             except Exception as e:
+    #                 alert(e)
+    #             dvt.close()
+    #             break
 
     def launch_app_by_goios(self, bundle_id, udid):
-        goios_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ios.exe")
+        goios_path = get_goios_path()
         if not os.path.exists(goios_path):
             alert("GoiOS可执行文件不存在")
             return
@@ -289,23 +316,21 @@ class FNDeviceDebugApp:
             cmd = [goios_path, "launch", bundle_id, "--kill-existing"]
             launch_args = ['fnShowLog', '-FIRAnalyticsDebugEnabled', '-FIRDebugEnabled', '-FIRAnalyticsVerboseLoggingEnabled']
             for arg in launch_args:
-                cmd.append("--arg=\""+arg+"\"")
-            cmd.append("--udid=\""+udid+"\"")
+                cmd.append("--arg="+arg)
+            cmd.append("--udid="+udid)
             # 使用 GoiOS 启动应用，需要等待命令执行结果
             result = subprocess.run(cmd, 
                                   capture_output=True, 
                                   text=True, 
-                                  timeout=30)  # 设置30秒超时
+                                  timeout=10)  # 设置30秒超时
             
             if result.returncode == 0:
                 print(f"GoiOS启动应用成功: {bundle_id}")
                 if result.stdout:
                     print(f"输出: {result.stdout}")
-                alert("应用启动成功")
             else:
                 print(f"GoiOS启动应用失败: {result.stderr}")
-                alert(f"应用启动失败: {result.stderr}")
-                
+
         except subprocess.TimeoutExpired:
             alert("启动应用超时，请检查设备连接")
         except FileNotFoundError:
@@ -397,6 +422,38 @@ class FNDeviceDebugApp:
         except (BrokenPipeError, IOError):
             self.syslog_service = None
             self.reset_syslog_button_text()
+
+    def goios_sys_log(self):
+        try:
+            goios_path = get_goios_path()
+            self.syslog_service = subprocess.Popen(
+                [goios_path, "syslog"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,  # 自动解码为字符串
+                bufsize=1,  # 行缓冲
+                universal_newlines=True  # 兼容旧版本
+            )
+
+            for line in self.syslog_service.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                import json
+                obj = json.loads(line)
+                line_log = obj.get("msg", "")
+                # unicode_escape 解码
+                line_log = line_log.encode("utf-8").decode("unicode_escape")
+
+                syslog_filter = self.syslog_filter_entry.get()
+                if syslog_filter == '' or line_log.find(syslog_filter) != -1:
+                    self.syslog_queue.put(line_log+"\n")
+
+            self.syslog_service = None
+            self.reset_syslog_button_text()
+        except Exception as e:
+            print(f"启动应用时发生错误: {str(e)}")
+            alert(f"启动应用失败: {str(e)}")
 
     def py3_sys_log(self):
         lockdown = create_using_usbmux()
@@ -537,31 +594,42 @@ def start_proxy(udid, lport, rport):
     relay(d, lport, rport)
     print(f"端口转发，pc:{lport}, iphone:{rport}")
 
+def get_goios_path():
+    if getattr(sys, 'frozen', False):
+        # PyInstaller 打包后的运行环境
+        base_path = os.path.dirname(sys.executable)
+    else:
+        # 普通 Python 环境
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    goios_path = os.path.join(base_path, "ios.exe")
+    print("goios path: ", goios_path)
+    return goios_path
+
 
 def check_goios():
-    goios_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ios.exe")
+    goios_path = get_goios_path()
     if not os.path.exists(goios_path):
         return False
     return True
 
 def start_goios():
-    goios_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ios.exe")
+    goios_path = get_goios_path()
     if not os.path.exists(goios_path):
+        print(f"GoiOS executable not found at: {goios_path}")
         return
     
     try:
-        # 运行 ios.exe tunnel start 命令作为后台进程（长驻服务）
-        process = subprocess.Popen([goios_path, "tunnel", "start"], 
-                                 stdout=subprocess.PIPE, 
-                                 stderr=subprocess.PIPE,
-                                 text=True)
-        print(f"GoiOS tunnel service started with PID: {process.pid}")
-        return process
+        # 运行 ios tunnel start 命令作为后台进程（长驻服务）
+        proc = subprocess.Popen([goios_path, "tunnel", "start"],
+                                  stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE,
+                              text=True)
+        proc.wait()
     except FileNotFoundError:
         print(f"GoiOS executable not found at: {goios_path}")
     except Exception as e:
         print(f"Error starting GoiOS tunnel: {str(e)}")
-    return None
 
 def main():
     multiprocessing.freeze_support()
@@ -570,10 +638,10 @@ def main():
     print("本机局域网IP信息：")
     print(socket.gethostbyname_ex(socket.gethostname()))
     if check_goios():
-        # 直接启动 GoiOS tunnel 服务，不需要用 multiprocessing
-        goios_process = start_goios()
-        if goios_process:
-            app.goios_process = goios_process
+        # 使用 multiprocessing 启动 GoiOS tunnel 服务
+        app.goios_process = multiprocessing.Process(target=start_goios)
+        app.goios_process.start()
+        print(f"GoiOS tunnel service started with PID: {app.goios_process.pid}")
 
     app.show()
 
