@@ -273,7 +273,7 @@ class FNDeviceDebugApp:
             return
 
         env = {}
-        launch_args = ['fnShowLog', '-FIRAnalyticsDebugEnabled', '-FIRDebugEnabled', '-FIRAnalyticsVerboseLoggingEnabled']
+        launch_args = self.get_launch_args()
         try:
             with d.connect_instruments() as ts:
                 pid = ts.app_launch(bundle_id,
@@ -305,16 +305,36 @@ class FNDeviceDebugApp:
     #                 alert(e)
     #             dvt.close()
     #             break
+    def get_launch_args(self):
+        launch_args = ["fnToastLog", 'fnShowLog', '-FIRAnalyticsDebugEnabled', '-FIRDebugEnabled',
+                       '-FIRAnalyticsVerboseLoggingEnabled']
+
+        def get_extra_arguments():
+            if getattr(sys, 'frozen', False):
+                # PyInstaller 打包后的运行环境
+                base_path = os.path.dirname(sys.executable)
+            else:
+                # 普通 Python 环境
+                base_path = os.path.dirname(os.path.abspath(__file__))
+            arguments_path = os.path.join(base_path, "arguments.txt")
+            if not os.path.exists(arguments_path):
+                return []
+            with open(arguments_path, "r") as f:
+                arguments = f.read().splitlines()
+            return arguments
+
+        launch_args.extend(get_extra_arguments())
+        return launch_args
 
     def launch_app_by_goios(self, bundle_id, udid):
         goios_path = get_goios_path()
-        if not os.path.exists(goios_path):
-            alert("GoiOS可执行文件不存在")
-            return
+        # if not os.path.exists(goios_path):
+        #     alert("GoiOS可执行文件不存在")
+        #     return
         
         try:
             cmd = [goios_path, "launch", bundle_id, "--kill-existing"]
-            launch_args = ['fnShowLog', '-FIRAnalyticsDebugEnabled', '-FIRDebugEnabled', '-FIRAnalyticsVerboseLoggingEnabled']
+            launch_args = self.get_launch_args()
             for arg in launch_args:
                 cmd.append("--arg="+arg)
             cmd.append("--udid="+udid)
@@ -345,8 +365,7 @@ class FNDeviceDebugApp:
             "capabilities": {
                 "alwaysMatch": {
                     "appium:bundleId": bundle_id,
-                    "appium:arguments": ["-FIRAnalyticsDebugEnabled", "-FIRDebugEnabled",
-                                         '-FIRAnalyticsVerboseLoggingEnabled'],
+                    "appium:arguments": self.get_launch_args(),
                     "appium:forceAppLaunch": "1",
                     "appium:shouldTerminateApp": "0",
                 }
@@ -604,7 +623,6 @@ def get_goios_path():
     goios_path = os.path.join(base_path, "ios.exe")
     print("goios path: ", goios_path)
     return goios_path
-
 
 def check_goios():
     goios_path = get_goios_path()
